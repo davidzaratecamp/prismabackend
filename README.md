@@ -61,9 +61,15 @@ Con `seed:demo` se crean `laura.gomez@`, `diego.ramirez@`, `sara.pena@` (develop
 `Proyecto → Módulo → Tarea`. Peso por estado de tarea: `done 100`, `testing 75`,
 `in_progress 40`, `blocked 10`, `todo 0`.
 
-- **Módulo** = promedio de sus tareas (o `progress_manual` si se define).
-- **Proyecto** = promedio de módulos **ponderado por `weight`** (o `progress_manual`).
+- **Módulo** = promedio de sus tareas. Si aún no tiene tareas, toma el avance de su
+  **estado** (`STATUS_PROGRESS`: `completed 100`, `testing 75`, `in_progress 40`,
+  `blocked 10`, `planned`/`paused 0`). Un `progress_manual` fijado gana sobre todo.
+- **Proyecto** = promedio del avance de sus módulos. Si no tiene módulos, toma el avance
+  de su propio estado. Un `progress_manual` fijado gana sobre todo.
 - `recomputeProject()` (`src/utils/progress.js`) se ejecuta tras cada escritura.
+
+> La columna `modules.weight` existe (default 1) y el cálculo la soporta como promedio
+> ponderado, pero la interfaz no la expone: todos los módulos pesan igual.
 
 `repo_url` (proyecto y módulo) queda listo para integrar la API de GitHub más adelante.
 

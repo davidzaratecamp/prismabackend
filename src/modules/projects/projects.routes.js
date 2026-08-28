@@ -32,6 +32,7 @@ const createSchema = z.object({
   start_date: isoDate.optional(),
   due_date: isoDate.optional(),
   progress_manual: z.number().int().min(0).max(100).nullable().optional(),
+  planned_modules_count: z.number().int().min(1).max(100).nullable().optional(),
   member_ids: z.array(z.number().int().positive()).optional(),
 });
 
@@ -139,6 +140,7 @@ router.post(
       start_date: b.start_date ?? null,
       due_date: b.due_date ?? null,
       progress_manual: b.progress_manual ?? null,
+      planned_modules_count: b.planned_modules_count ?? null,
       created_by: req.user.id,
     };
 
@@ -181,7 +183,7 @@ router.patch(
     const patch = { updated_at: db.fn.now() };
     for (const key of [
       'name', 'description', 'area_id', 'status', 'priority', 'lead_user_id',
-      'start_date', 'due_date', 'progress_manual',
+      'start_date', 'due_date', 'progress_manual', 'planned_modules_count',
     ]) {
       if (b[key] !== undefined) patch[key] = b[key];
     }

@@ -51,7 +51,6 @@ export async function seed(knex) {
         project_id: projectId,
         name: m.name,
         status: m.status || 'in_progress',
-        weight: m.weight || 1,
         order_index: order++,
       });
       let t = 0;

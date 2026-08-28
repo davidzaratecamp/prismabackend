@@ -4,7 +4,7 @@ import { db } from '../../db/knex.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { validate } from '../../middleware/validate.js';
 import { requireAuth, canWrite } from '../../middleware/auth.js';
-import { notFound } from '../../utils/httpError.js';
+import { notFound, badRequest } from '../../utils/httpError.js';
 import { logActivity } from '../../utils/activity.js';
 import { recomputeProject } from '../../utils/progress.js';
 import tasksRouter from '../tasks/tasks.routes.js';
@@ -33,6 +33,19 @@ async function loadProject(projectId) {
   return project;
 }
 
+/**
+ * La fecha de entrega de un módulo no puede superar la del proyecto.
+ * Si el proyecto no tiene fecha de entrega, no hay tope.
+ */
+function assertDueWithinProject(moduleDue, project) {
+  if (!moduleDue || !project.due_date) return;
+  if (moduleDue > project.due_date) {
+    throw badRequest(
+      `La entrega del módulo (${moduleDue}) no puede ser posterior a la del proyecto (${project.due_date}).`
+    );
+  }
+}
+
 // GET /api/projects/:projectId/modules
 router.get(
   '/',
@@ -52,6 +65,7 @@ router.post(
   asyncHandler(async (req, res) => {
     const project = await loadProject(req.params.projectId);
     const b = req.body;
+    assertDueWithinProject(b.due_date, project);
     const max = await db('modules')
       .where({ project_id: project.id })
       .max({ m: 'order_index' })
@@ -88,6 +102,10 @@ router.patch(
     const mod = await db('modules').where({ id: req.params.moduleId }).first();
     if (!mod) throw notFound('Módulo no encontrado');
     const b = req.body;
+    if (b.due_date !== undefined) {
+      const project = await db('projects').where({ id: mod.project_id }).first();
+      assertDueWithinProject(b.due_date, project);
+    }
     const patch = { updated_at: db.fn.now() };
     for (const k of ['name', 'description', 'status', 'weight', 'progress_manual', 'order_index', 'due_date']) {
       if (b[k] !== undefined) patch[k] = b[k];
