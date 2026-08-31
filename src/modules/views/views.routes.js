@@ -87,7 +87,7 @@ router.get(
     if (project_id) q.where('projects.id', project_id);
     const tasks = await q;
 
-    const columns = ['todo', 'in_progress', 'testing', 'blocked', 'done'];
+    const columns = ['todo', 'in_progress', 'testing', 'done', 'blocked'];
     const grouped = Object.fromEntries(columns.map((c) => [c, []]));
     for (const t of tasks) grouped[t.status]?.push(t);
     res.json(grouped);

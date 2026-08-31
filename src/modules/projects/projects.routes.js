@@ -127,7 +127,8 @@ router.get(
       );
     }
     if (q) query.where('name', 'like', `%${q}%`);
-    query.orderByRaw("FIELD(priority,'critical','high','medium','low')").orderBy('due_date', 'asc');
+    // Más reciente primero
+    query.orderBy('projects.created_at', 'desc').orderBy('projects.id', 'desc');
 
     const rows = await query;
     const hydrated = await Promise.all(rows.map((r) => hydrateProject(r)));
