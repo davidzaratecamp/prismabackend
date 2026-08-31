@@ -28,31 +28,30 @@ const createSchema = z.object({
   status: z.enum(STATUSES).optional(),
   priority: z.enum(PRIORITIES).optional(),
   lead_user_id: z.number().int().positive().nullable().optional(),
-  requested_by_user_id: z.number().int().positive().nullable().optional(),
   repo_url: z.string().url().max(400).nullable().optional().or(z.literal('')),
   start_date: isoDate.optional(),
   due_date: isoDate.optional(),
   progress_manual: z.number().int().min(0).max(100).nullable().optional(),
   planned_modules_count: z.number().int().min(1).max(100).nullable().optional(),
   member_ids: z.array(z.number().int().positive()).optional(),
+  requester_ids: z.array(z.number().int().positive()).optional(),
 });
 
 const updateSchema = createSchema.partial().omit({ member_ids: true });
 
 async function hydrateProject(row, { withChildren = false } = {}) {
-  const [lead, requester, area, members] = await Promise.all([
+  const [lead, area, members, requesters] = await Promise.all([
     row.lead_user_id
       ? db('users').where({ id: row.lead_user_id }).first('id', 'name', 'avatar_color', 'email')
-      : null,
-    row.requested_by_user_id
-      ? db('users')
-          .where({ id: row.requested_by_user_id })
-          .first('id', 'name', 'avatar_color', 'email', 'role')
       : null,
     db('areas').where({ id: row.area_id }).first('id', 'name', 'slug', 'color'),
     db('project_members')
       .join('users', 'users.id', 'project_members.user_id')
       .where('project_members.project_id', row.id)
+      .select('users.id', 'users.name', 'users.avatar_color', 'users.email', 'users.role'),
+    db('project_requesters')
+      .join('users', 'users.id', 'project_requesters.user_id')
+      .where('project_requesters.project_id', row.id)
       .select('users.id', 'users.name', 'users.avatar_color', 'users.email', 'users.role'),
   ]);
 
@@ -67,9 +66,9 @@ async function hydrateProject(row, { withChildren = false } = {}) {
   const result = {
     ...row,
     lead,
-    requester,
     area,
     members,
+    requesters,
     module_count: Number(counts?.c || 0),
     task_counts: taskCounts.reduce((acc, r) => ({ ...acc, [r.status]: Number(r.c) }), {}),
   };
@@ -109,7 +108,12 @@ router.get(
     if (area_id) query.where('area_id', area_id);
     if (status) query.where('status', status);
     if (lead_user_id) query.where('lead_user_id', lead_user_id);
-    if (requested_by_user_id) query.where('requested_by_user_id', requested_by_user_id);
+    if (requested_by_user_id) {
+      query.whereIn(
+        'projects.id',
+        db('project_requesters').where('user_id', requested_by_user_id).select('project_id')
+      );
+    }
     if (q) query.where('name', 'like', `%${q}%`);
     query.orderByRaw("FIELD(priority,'critical','high','medium','low')").orderBy('due_date', 'asc');
 
@@ -144,7 +148,6 @@ router.post(
       status: b.status ?? 'planned',
       priority: b.priority ?? 'medium',
       lead_user_id: b.lead_user_id ?? null,
-      requested_by_user_id: b.requested_by_user_id ?? null,
       repo_url: b.repo_url || null,
       start_date: b.start_date ?? null,
       due_date: b.due_date ?? null,
@@ -160,6 +163,12 @@ router.post(
       if (memberIds.size) {
         await trx('project_members').insert(
           [...memberIds].map((user_id) => ({ project_id: newId, user_id }))
+        );
+      }
+      const requesterIds = [...new Set(b.requester_ids || [])];
+      if (requesterIds.length) {
+        await trx('project_requesters').insert(
+          requesterIds.map((user_id) => ({ project_id: newId, user_id }))
         );
       }
       await recomputeProject(newId, trx);
@@ -192,8 +201,7 @@ router.patch(
     const patch = { updated_at: db.fn.now() };
     for (const key of [
       'name', 'description', 'area_id', 'status', 'priority', 'lead_user_id',
-      'requested_by_user_id', 'start_date', 'due_date', 'progress_manual',
-      'planned_modules_count',
+      'start_date', 'due_date', 'progress_manual', 'planned_modules_count',
     ]) {
       if (b[key] !== undefined) patch[key] = b[key];
     }
@@ -202,6 +210,15 @@ router.patch(
 
     await db.transaction(async (trx) => {
       await trx('projects').where({ id: project.id }).update(patch);
+      if (b.requester_ids !== undefined) {
+        await trx('project_requesters').where({ project_id: project.id }).del();
+        const ids = [...new Set(b.requester_ids)];
+        if (ids.length) {
+          await trx('project_requesters').insert(
+            ids.map((user_id) => ({ project_id: project.id, user_id }))
+          );
+        }
+      }
       await recomputeProject(project.id, trx);
     });
 
@@ -234,6 +251,28 @@ router.put(
       if (member_ids.length) {
         await trx('project_members').insert(
           member_ids.map((user_id) => ({ project_id: project.id, user_id }))
+        );
+      }
+    });
+    const row = await db('projects').where({ id: project.id }).first();
+    res.json(await hydrateProject(row, { withChildren: true }));
+  })
+);
+
+// PUT /api/projects/:id/requesters  — reemplaza la lista de solicitantes
+router.put(
+  '/:id/requesters',
+  canWrite,
+  validate(z.object({ requester_ids: z.array(z.number().int().positive()) })),
+  asyncHandler(async (req, res) => {
+    const project = await db('projects').where({ id: req.params.id }).first();
+    if (!project) throw notFound('Proyecto no encontrado');
+    const ids = [...new Set(req.body.requester_ids)];
+    await db.transaction(async (trx) => {
+      await trx('project_requesters').where({ project_id: project.id }).del();
+      if (ids.length) {
+        await trx('project_requesters').insert(
+          ids.map((user_id) => ({ project_id: project.id, user_id }))
         );
       }
     });

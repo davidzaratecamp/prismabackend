@@ -27,7 +27,7 @@ export async function seed(knex) {
     const [id] = await knex('users').insert({ ...d, password_hash: hash });
     devIds.push(id);
   }
-  const [laura, diego, sara] = devIds;
+  const [laura, diego, sara, obamaLider] = devIds;
   const admin = await knex('users').where({ role: 'admin' }).first('id');
 
   async function makeProject(p, modules) {
@@ -44,6 +44,13 @@ export async function seed(knex) {
     });
     const members = new Set([p.lead, ...(p.members || [])].filter(Boolean));
     await knex('project_members').insert([...members].map((user_id) => ({ project_id: projectId, user_id })));
+
+    const requesters = [...new Set((p.requesters || []).filter(Boolean))];
+    if (requesters.length) {
+      await knex('project_requesters').insert(
+        requesters.map((user_id) => ({ project_id: projectId, user_id }))
+      );
+    }
 
     let order = 0;
     for (const m of modules) {
@@ -116,7 +123,8 @@ export async function seed(knex) {
         name: 'Tablero de siniestros Obama',
         description: 'Seguimiento de casos y tiempos de respuesta del área Obama.',
         area_id: areaBySlug['obama'], status: 'testing', priority: 'medium',
-        lead: sara, members: [laura], start_date: '2026-06-01', due_date: '2026-08-20',
+        lead: sara, members: [laura], requesters: [obamaLider],
+        start_date: '2026-06-01', due_date: '2026-08-20',
       },
       modules: [
         { name: 'Ingesta de casos', weight: 1, tasks: [
