@@ -179,7 +179,7 @@ export async function seed(knex) {
       p: {
         name: 'Portal de vacantes Reclutamiento',
         description: 'Publicación de vacantes y seguimiento de candidatos por etapa.',
-        area_id: areaBySlug['formacion-reclutamiento'], status: 'in_progress', priority: 'high',
+        area_id: areaBySlug['reclutamiento-y-seleccion'], status: 'in_progress', priority: 'high',
         lead: sara, members: [laura, diego], start_date: '2026-08-10', due_date: '2026-10-30',
       },
       modules: [

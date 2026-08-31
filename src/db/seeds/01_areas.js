@@ -6,11 +6,13 @@ const AREAS = [
   { name: 'Contratación', slug: 'contratacion', color: '#8b5cf6', description: 'Contratación' },
   { name: 'Gestión Humana', slug: 'gestion-humana', color: '#ec4899', description: 'Gestión Humana' },
   {
-    name: 'Formación y Reclutamiento',
-    slug: 'formacion-reclutamiento',
+    name: 'Reclutamiento y Selección',
+    slug: 'reclutamiento-y-seleccion',
     color: '#f59e0b',
-    description: 'Formación + Reclutamiento y Selección (una sola área)',
+    description: 'Reclutamiento y Selección',
   },
+  { name: 'Formación', slug: 'formacion', color: '#84cc16', description: 'Área de Formación' },
+  { name: 'Tecnología', slug: 'tecnologia', color: '#14b8a6', description: 'Área de Tecnología' },
 ];
 
 /**
