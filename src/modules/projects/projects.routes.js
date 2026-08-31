@@ -28,6 +28,7 @@ const createSchema = z.object({
   status: z.enum(STATUSES).optional(),
   priority: z.enum(PRIORITIES).optional(),
   lead_user_id: z.number().int().positive().nullable().optional(),
+  requested_by_user_id: z.number().int().positive().nullable().optional(),
   repo_url: z.string().url().max(400).nullable().optional().or(z.literal('')),
   start_date: isoDate.optional(),
   due_date: isoDate.optional(),
@@ -39,9 +40,14 @@ const createSchema = z.object({
 const updateSchema = createSchema.partial().omit({ member_ids: true });
 
 async function hydrateProject(row, { withChildren = false } = {}) {
-  const [lead, area, members] = await Promise.all([
+  const [lead, requester, area, members] = await Promise.all([
     row.lead_user_id
       ? db('users').where({ id: row.lead_user_id }).first('id', 'name', 'avatar_color', 'email')
+      : null,
+    row.requested_by_user_id
+      ? db('users')
+          .where({ id: row.requested_by_user_id })
+          .first('id', 'name', 'avatar_color', 'email', 'role')
       : null,
     db('areas').where({ id: row.area_id }).first('id', 'name', 'slug', 'color'),
     db('project_members')
@@ -61,6 +67,7 @@ async function hydrateProject(row, { withChildren = false } = {}) {
   const result = {
     ...row,
     lead,
+    requester,
     area,
     members,
     module_count: Number(counts?.c || 0),
@@ -95,13 +102,14 @@ async function hydrateProject(row, { withChildren = false } = {}) {
 router.get(
   '/',
   asyncHandler(async (req, res) => {
-    const { area_id, status, lead_user_id, q, archived } = req.query;
+    const { area_id, status, lead_user_id, requested_by_user_id, q, archived } = req.query;
     const query = db('projects').select('projects.*');
     if (archived === 'true') query.whereNotNull('archived_at');
     else query.whereNull('archived_at');
     if (area_id) query.where('area_id', area_id);
     if (status) query.where('status', status);
     if (lead_user_id) query.where('lead_user_id', lead_user_id);
+    if (requested_by_user_id) query.where('requested_by_user_id', requested_by_user_id);
     if (q) query.where('name', 'like', `%${q}%`);
     query.orderByRaw("FIELD(priority,'critical','high','medium','low')").orderBy('due_date', 'asc');
 
@@ -136,6 +144,7 @@ router.post(
       status: b.status ?? 'planned',
       priority: b.priority ?? 'medium',
       lead_user_id: b.lead_user_id ?? null,
+      requested_by_user_id: b.requested_by_user_id ?? null,
       repo_url: b.repo_url || null,
       start_date: b.start_date ?? null,
       due_date: b.due_date ?? null,
@@ -183,7 +192,8 @@ router.patch(
     const patch = { updated_at: db.fn.now() };
     for (const key of [
       'name', 'description', 'area_id', 'status', 'priority', 'lead_user_id',
-      'start_date', 'due_date', 'progress_manual', 'planned_modules_count',
+      'requested_by_user_id', 'start_date', 'due_date', 'progress_manual',
+      'planned_modules_count',
     ]) {
       if (b[key] !== undefined) patch[key] = b[key];
     }
