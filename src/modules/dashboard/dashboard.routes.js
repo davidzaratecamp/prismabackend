@@ -9,9 +9,12 @@ router.use(requireAuth);
 const ACTIVE_STATUSES = ['planned', 'in_progress', 'testing', 'blocked'];
 
 async function buildOverview(areaId = null) {
+  const projectsInArea = () =>
+    db('project_areas').where('area_id', areaId).select('project_id');
+
   const base = () => {
     const q = db('projects').whereNull('archived_at');
-    if (areaId) q.where('area_id', areaId);
+    if (areaId) q.whereIn('projects.id', projectsInArea());
     return q;
   };
 
@@ -41,11 +44,12 @@ async function buildOverview(areaId = null) {
     .whereNotIn('status', ['completed', 'paused'])
     .count({ c: '*' });
 
-  // Avance y conteo por área
-  const byAreaRows = await db('projects')
-    .join('areas', 'areas.id', 'projects.area_id')
+  // Avance y conteo por área (un proyecto multi-área cuenta en cada una)
+  const byAreaRows = await db('project_areas')
+    .join('projects', 'projects.id', 'project_areas.project_id')
+    .join('areas', 'areas.id', 'project_areas.area_id')
     .whereNull('projects.archived_at')
-    .modify((q) => areaId && q.where('projects.area_id', areaId))
+    .modify((q) => areaId && q.where('project_areas.area_id', areaId))
     .groupBy('areas.id')
     .select(
       'areas.id',
@@ -68,7 +72,11 @@ async function buildOverview(areaId = null) {
     .leftJoin('modules', 'modules.id', 'tasks.module_id')
     .leftJoin('projects', 'projects.id', 'modules.project_id')
     .modify((q) => {
-      if (areaId) q.andWhere((w) => w.where('projects.area_id', areaId).orWhereNull('projects.id'));
+      if (areaId) {
+        q.andWhere((w) =>
+          w.whereIn('projects.id', projectsInArea()).orWhereNull('projects.id')
+        );
+      }
     })
     .groupBy('users.id')
     .select(
@@ -85,7 +93,7 @@ async function buildOverview(areaId = null) {
   const leadCounts = await db('projects')
     .whereNull('archived_at')
     .whereNotNull('lead_user_id')
-    .modify((q) => areaId && q.where('area_id', areaId))
+    .modify((q) => areaId && q.whereIn('id', projectsInArea()))
     .groupBy('lead_user_id')
     .select('lead_user_id')
     .count({ c: '*' });
@@ -96,7 +104,7 @@ async function buildOverview(areaId = null) {
     .join('areas', 'areas.id', 'projects.area_id')
     .leftJoin('users', 'users.id', 'projects.lead_user_id')
     .whereNull('projects.archived_at')
-    .modify((q) => areaId && q.where('projects.area_id', areaId))
+    .modify((q) => areaId && q.whereIn('projects.id', projectsInArea()))
     .where((w) =>
       w
         .where('projects.status', 'blocked')

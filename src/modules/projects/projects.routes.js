@@ -25,6 +25,7 @@ const createSchema = z.object({
   name: z.string().min(2).max(160),
   description: z.string().max(5000).nullable().optional(),
   area_id: z.number().int().positive(),
+  area_ids: z.array(z.number().int().positive()).min(1).optional(),
   status: z.enum(STATUSES).optional(),
   priority: z.enum(PRIORITIES).optional(),
   lead_user_id: z.number().int().positive().nullable().optional(),
@@ -40,11 +41,16 @@ const createSchema = z.object({
 const updateSchema = createSchema.partial().omit({ member_ids: true });
 
 async function hydrateProject(row, { withChildren = false } = {}) {
-  const [lead, area, members, requesters] = await Promise.all([
+  const [lead, area, areas, members, requesters] = await Promise.all([
     row.lead_user_id
       ? db('users').where({ id: row.lead_user_id }).first('id', 'name', 'avatar_color', 'email')
       : null,
     db('areas').where({ id: row.area_id }).first('id', 'name', 'slug', 'color'),
+    db('project_areas')
+      .join('areas', 'areas.id', 'project_areas.area_id')
+      .where('project_areas.project_id', row.id)
+      .orderBy('areas.name')
+      .select('areas.id', 'areas.name', 'areas.slug', 'areas.color'),
     db('project_members')
       .join('users', 'users.id', 'project_members.user_id')
       .where('project_members.project_id', row.id)
@@ -67,6 +73,7 @@ async function hydrateProject(row, { withChildren = false } = {}) {
     ...row,
     lead,
     area,
+    areas: areas.length ? areas : area ? [area] : [],
     members,
     requesters,
     module_count: Number(counts?.c || 0),
@@ -105,7 +112,12 @@ router.get(
     const query = db('projects').select('projects.*');
     if (archived === 'true') query.whereNotNull('archived_at');
     else query.whereNull('archived_at');
-    if (area_id) query.where('area_id', area_id);
+    if (area_id) {
+      query.whereIn(
+        'projects.id',
+        db('project_areas').where('area_id', area_id).select('project_id')
+      );
+    }
     if (status) query.where('status', status);
     if (lead_user_id) query.where('lead_user_id', lead_user_id);
     if (requested_by_user_id) {
@@ -141,6 +153,10 @@ router.post(
     const area = await db('areas').where({ id: b.area_id }).first();
     if (!area) throw notFound('El área indicada no existe');
 
+    const areaIds = [...new Set([b.area_id, ...(b.area_ids || [])])];
+    const validAreas = await db('areas').whereIn('id', areaIds).count({ c: '*' }).first();
+    if (Number(validAreas.c) !== areaIds.length) throw notFound('Alguna área indicada no existe');
+
     const insert = {
       name: b.name,
       description: b.description ?? null,
@@ -158,6 +174,9 @@ router.post(
 
     const id = await db.transaction(async (trx) => {
       const [newId] = await trx('projects').insert(insert);
+      await trx('project_areas').insert(
+        areaIds.map((area_id) => ({ project_id: newId, area_id }))
+      );
       const memberIds = new Set(b.member_ids || []);
       if (b.lead_user_id) memberIds.add(b.lead_user_id);
       if (memberIds.size) {
@@ -208,8 +227,26 @@ router.patch(
     if (b.repo_url !== undefined) patch.repo_url = b.repo_url || null;
     if (b.status === 'completed') patch.completed_at = db.fn.now();
 
+    const newPrimaryArea = patch.area_id ?? project.area_id;
+
     await db.transaction(async (trx) => {
       await trx('projects').where({ id: project.id }).update(patch);
+
+      if (b.area_ids !== undefined) {
+        // reemplazo completo del conjunto de áreas
+        const areaIds = [...new Set([newPrimaryArea, ...b.area_ids])];
+        await trx('project_areas').where({ project_id: project.id }).del();
+        await trx('project_areas').insert(
+          areaIds.map((area_id) => ({ project_id: project.id, area_id }))
+        );
+      } else if (b.area_id !== undefined) {
+        // solo cambió el área principal: garantizar que esté en el conjunto
+        await trx('project_areas')
+          .insert({ project_id: project.id, area_id: newPrimaryArea })
+          .onConflict(['project_id', 'area_id'])
+          .ignore();
+      }
+
       if (b.requester_ids !== undefined) {
         await trx('project_requesters').where({ project_id: project.id }).del();
         const ids = [...new Set(b.requester_ids)];
@@ -232,6 +269,27 @@ router.patch(
       meta: patch,
     });
 
+    const row = await db('projects').where({ id: project.id }).first();
+    res.json(await hydrateProject(row, { withChildren: true }));
+  })
+);
+
+// PUT /api/projects/:id/areas  — reemplaza el conjunto de áreas (la 1ª pasa a ser la principal)
+router.put(
+  '/:id/areas',
+  canWrite,
+  validate(z.object({ area_ids: z.array(z.number().int().positive()).min(1) })),
+  asyncHandler(async (req, res) => {
+    const project = await db('projects').where({ id: req.params.id }).first();
+    if (!project) throw notFound('Proyecto no encontrado');
+    const ids = [...new Set(req.body.area_ids)];
+    const valid = await db('areas').whereIn('id', ids).count({ c: '*' }).first();
+    if (Number(valid.c) !== ids.length) throw notFound('Alguna área indicada no existe');
+    await db.transaction(async (trx) => {
+      await trx('projects').where({ id: project.id }).update({ area_id: ids[0], updated_at: trx.fn.now() });
+      await trx('project_areas').where({ project_id: project.id }).del();
+      await trx('project_areas').insert(ids.map((area_id) => ({ project_id: project.id, area_id })));
+    });
     const row = await db('projects').where({ id: project.id }).first();
     res.json(await hydrateProject(row, { withChildren: true }));
   })

@@ -28,7 +28,12 @@ router.get(
         'areas.color as area_color',
         'users.name as lead_name'
       );
-    if (req.query.area_id) q.where('projects.area_id', req.query.area_id);
+    if (req.query.area_id) {
+      q.whereIn(
+        'projects.id',
+        db('project_areas').where('area_id', req.query.area_id).select('project_id')
+      );
+    }
     const projects = await q;
 
     const ids = projects.map((p) => p.id);
@@ -73,7 +78,12 @@ router.get(
         'users.name as assignee_name',
         'users.avatar_color as assignee_color'
       );
-    if (area_id) q.where('projects.area_id', area_id);
+    if (area_id) {
+      q.whereIn(
+        'projects.id',
+        db('project_areas').where('area_id', area_id).select('project_id')
+      );
+    }
     if (project_id) q.where('projects.id', project_id);
     const tasks = await q;
 

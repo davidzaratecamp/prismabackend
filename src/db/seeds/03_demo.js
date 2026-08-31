@@ -42,6 +42,9 @@ export async function seed(knex) {
       due_date: p.due_date,
       created_by: admin.id,
     });
+    const areaIds = [...new Set([p.area_id, ...(p.extra_areas || [])])];
+    await knex('project_areas').insert(areaIds.map((area_id) => ({ project_id: projectId, area_id })));
+
     const members = new Set([p.lead, ...(p.members || [])].filter(Boolean));
     await knex('project_members').insert([...members].map((user_id) => ({ project_id: projectId, user_id })));
 

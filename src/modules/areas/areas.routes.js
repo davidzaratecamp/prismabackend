@@ -22,13 +22,14 @@ router.get(
   '/',
   asyncHandler(async (_req, res) => {
     const areas = await db('areas').select('*').orderBy('name');
-    const stats = await db('projects')
-      .whereNull('archived_at')
-      .groupBy('area_id')
-      .select('area_id')
+    const stats = await db('project_areas')
+      .join('projects', 'projects.id', 'project_areas.project_id')
+      .whereNull('projects.archived_at')
+      .groupBy('project_areas.area_id')
+      .select('project_areas.area_id as area_id')
       .count({ total: '*' })
-      .select(db.raw('SUM(status NOT IN ("completed","paused")) as active'))
-      .avg({ avg_progress: 'progress_cached' });
+      .select(db.raw('SUM(projects.status NOT IN ("completed","paused")) as active'))
+      .avg({ avg_progress: 'projects.progress_cached' });
     const byArea = new Map(stats.map((s) => [s.area_id, s]));
     res.json(
       areas.map((a) => {
@@ -107,7 +108,9 @@ router.delete(
   asyncHandler(async (req, res) => {
     const area = await db('areas').where({ id: req.params.id }).first();
     if (!area) throw notFound('Área no encontrada');
-    const inUse = await db('projects').where({ area_id: area.id }).first('id');
+    const inUse =
+      (await db('projects').where({ area_id: area.id }).first('id')) ||
+      (await db('project_areas').where({ area_id: area.id }).first('project_id'));
     if (inUse) throw badRequest('No se puede eliminar: hay proyectos en esta área');
     await db('areas').where({ id: area.id }).del();
     res.json({ ok: true });
