@@ -69,6 +69,23 @@ async function hydrateProject(row, { withChildren = false, watchedSet = null } =
     .count({ c: '*' })
     .groupBy('tasks.status');
 
+  // Última señal de actividad: edición del proyecto o de cualquiera de sus módulos/tareas.
+  const [modAct, taskAct] = await Promise.all([
+    db('modules').where({ project_id: row.id }).max({ u: 'updated_at', c: 'created_at' }).first(),
+    db('tasks')
+      .join('modules', 'modules.id', 'tasks.module_id')
+      .where('modules.project_id', row.id)
+      .max({ u: 'tasks.updated_at', c: 'tasks.created_at' })
+      .first(),
+  ]);
+  const last_activity_at = [
+    row.updated_at, row.created_at,
+    modAct?.u, modAct?.c, taskAct?.u, taskAct?.c,
+  ]
+    .filter(Boolean)
+    .sort()
+    .at(-1);
+
   const result = {
     ...row,
     lead,
@@ -77,6 +94,7 @@ async function hydrateProject(row, { withChildren = false, watchedSet = null } =
     members,
     requesters,
     is_watched: watchedSet ? watchedSet.has(row.id) : false,
+    last_activity_at,
     module_count: Number(counts?.c || 0),
     task_counts: taskCounts.reduce((acc, r) => ({ ...acc, [r.status]: Number(r.c) }), {}),
   };
