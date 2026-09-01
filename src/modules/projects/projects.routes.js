@@ -4,7 +4,7 @@ import { db } from '../../db/knex.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { validate } from '../../middleware/validate.js';
 import { requireAuth, canWrite } from '../../middleware/auth.js';
-import { notFound } from '../../utils/httpError.js';
+import { notFound, forbidden } from '../../utils/httpError.js';
 import { logActivity } from '../../utils/activity.js';
 import { recomputeProject } from '../../utils/progress.js';
 import modulesRouter from '../modules/modules.routes.js';
@@ -247,6 +247,19 @@ router.patch(
     if (!project) throw notFound('Proyecto no encontrado');
 
     const b = req.body;
+
+    // La fecha de entrega, una vez definida, solo la cambia un administrador.
+    if (
+      b.due_date !== undefined &&
+      req.user.role !== 'admin' &&
+      project.due_date &&
+      b.due_date !== project.due_date
+    ) {
+      throw forbidden(
+        'La fecha de entrega ya está definida; solo un administrador puede cambiarla.'
+      );
+    }
+
     const patch = { updated_at: db.fn.now() };
     for (const key of [
       'name', 'description', 'area_id', 'status', 'priority', 'lead_user_id',
