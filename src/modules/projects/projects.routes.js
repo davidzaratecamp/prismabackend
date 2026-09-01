@@ -40,7 +40,7 @@ const createSchema = z.object({
 
 const updateSchema = createSchema.partial().omit({ member_ids: true });
 
-async function hydrateProject(row, { withChildren = false } = {}) {
+async function hydrateProject(row, { withChildren = false, watchedSet = null } = {}) {
   const [lead, area, areas, members, requesters] = await Promise.all([
     row.lead_user_id
       ? db('users').where({ id: row.lead_user_id }).first('id', 'name', 'avatar_color', 'email')
@@ -76,6 +76,7 @@ async function hydrateProject(row, { withChildren = false } = {}) {
     areas: areas.length ? areas : area ? [area] : [],
     members,
     requesters,
+    is_watched: watchedSet ? watchedSet.has(row.id) : false,
     module_count: Number(counts?.c || 0),
     task_counts: taskCounts.reduce((acc, r) => ({ ...acc, [r.status]: Number(r.c) }), {}),
   };
@@ -131,17 +132,45 @@ router.get(
     query.orderBy('projects.created_at', 'desc').orderBy('projects.id', 'desc');
 
     const rows = await query;
-    const hydrated = await Promise.all(rows.map((r) => hydrateProject(r)));
+    const watchedSet = await getWatchedSet(req.user.id);
+    if (req.query.watched === 'true') {
+      const filtered = rows.filter((r) => watchedSet.has(r.id));
+      return res.json(await Promise.all(filtered.map((r) => hydrateProject(r, { watchedSet }))));
+    }
+    const hydrated = await Promise.all(rows.map((r) => hydrateProject(r, { watchedSet })));
     res.json(hydrated);
   })
 );
+
+async function getWatchedSet(userId) {
+  const rows = await db('watched_projects').where({ user_id: userId }).select('project_id');
+  return new Set(rows.map((r) => r.project_id));
+}
 
 router.get(
   '/:id',
   asyncHandler(async (req, res) => {
     const row = await db('projects').where({ id: req.params.id }).first();
     if (!row) throw notFound('Proyecto no encontrado');
-    res.json(await hydrateProject(row, { withChildren: true }));
+    const watchedSet = await getWatchedSet(req.user.id);
+    res.json(await hydrateProject(row, { withChildren: true, watchedSet }));
+  })
+);
+
+// PUT /api/projects/:id/watch  — seguir / dejar de seguir (cualquier rol)
+router.put(
+  '/:id/watch',
+  validate(z.object({ watched: z.boolean() })),
+  asyncHandler(async (req, res) => {
+    const project = await db('projects').where({ id: req.params.id }).first('id');
+    if (!project) throw notFound('Proyecto no encontrado');
+    const row = { user_id: req.user.id, project_id: project.id };
+    if (req.body.watched) {
+      await db('watched_projects').insert(row).onConflict(['user_id', 'project_id']).ignore();
+    } else {
+      await db('watched_projects').where(row).del();
+    }
+    res.json({ ok: true, watched: req.body.watched });
   })
 );
 
