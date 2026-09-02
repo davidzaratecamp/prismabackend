@@ -373,10 +373,18 @@ export async function getMonthlyComparison(f = {}) {
         db.raw("SUM(CASE WHEN call_successful=1 THEN 1 ELSE 0 END) as successful")
       );
 
-  const [curr, prev] = await Promise.all([agg(startCurr, startNext), agg(startPrev, startCurr)]);
+  // Mismo punto del mes anterior: desde su día 1 hasta los mismos ms transcurridos.
+  const prevSameEnd = new Date(startPrev.getTime() + msElapsed);
+
+  const [curr, prev, prevSame] = await Promise.all([
+    agg(startCurr, startNext),
+    agg(startPrev, startCurr),
+    agg(startPrev, prevSameEnd),
+  ]);
 
   const currCost = Number(curr.cost_usd) || 0;
   const prevCost = Number(prev.cost_usd) || 0;
+  const prevSameCost = Number(prevSame.cost_usd) || 0;
   const projected = round((currCost / daysElapsed) * daysInMonth, 2);
 
   return {
@@ -389,6 +397,7 @@ export async function getMonthlyComparison(f = {}) {
       days_elapsed: Math.floor(daysElapsed),
       days_in_month: daysInMonth,
       projected_cost_usd: projected,
+      projection_reliable: daysElapsed >= 3,
     },
     previous_month: {
       label: startPrev.toISOString().slice(0, 7),
@@ -397,6 +406,16 @@ export async function getMonthlyComparison(f = {}) {
       minutes: round(prev.minutes, 1),
       successful: Number(prev.successful) || 0,
     },
+    previous_month_same_period: {
+      label: startPrev.toISOString().slice(0, 7),
+      through_day: Math.floor(daysElapsed),
+      calls: Number(prevSame.calls) || 0,
+      cost_usd: round(prevSameCost, 2),
+      minutes: round(prevSame.minutes, 1),
+      successful: Number(prevSame.successful) || 0,
+    },
+    same_period_change_pct:
+      prevSameCost > 0 ? round((currCost - prevSameCost) / prevSameCost, 4) : null,
     projected_vs_previous_pct:
       prevCost > 0 ? round((projected - prevCost) / prevCost, 4) : null,
   };
