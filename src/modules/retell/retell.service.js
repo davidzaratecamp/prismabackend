@@ -333,6 +333,9 @@ export async function getDailyTrend(f = {}) {
       success_rate: analyzed ? round(Number(r.successful) / analyzed, 4) : null,
       positive_rate: st ? round(Number(r.positive) / st, 4) : null,
       negative_rate: st ? round(Number(r.negative) / st, 4) : null,
+      neutral_rate: st
+        ? round((st - Number(r.positive) - Number(r.negative)) / st, 4)
+        : null,
     };
   });
 }
@@ -362,25 +365,30 @@ export async function getDisconnectionBySuccess(f = {}) {
 }
 
 /**
- * Compara el mes calendario en curso contra el anterior y proyecta el costo a
- * fin de mes (regla de tres por días transcurridos). Ignora from/to; respeta
+ * Compara un mes contra el anterior. Por defecto el mes local en curso (con
+ * proyección a fin de mes); si se pasa `f.month` ('YYYY-MM') compara ese mes
+ * completo contra el previo, sin proyección. Ignora from/to; respeta
  * agentId / direction / callType.
  */
 export async function getMonthlyComparison(f = {}) {
   const now = new Date();
-  // "Ahora" en hora local, para saber en qué mes/día local estamos.
   const nowLocal = new Date(now.getTime() + TZ_OFFSET_MS);
-  const y = nowLocal.getUTCFullYear();
-  const m = nowLocal.getUTCMonth();
+
+  const mm = typeof f.month === 'string' && /^\d{4}-\d{2}$/.test(f.month) ? f.month : null;
+  const y = mm ? Number(mm.slice(0, 4)) : nowLocal.getUTCFullYear();
+  const m = mm ? Number(mm.slice(5, 7)) - 1 : nowLocal.getUTCMonth();
 
   // Límites de mes local, expresados como instantes UTC (para comparar contra started_at).
   const startCurr = localMonthStartUtc(y, m);
   const startPrev = localMonthStartUtc(y, m - 1);
   const startNext = localMonthStartUtc(y, m + 1);
 
+  const isCurrentMonth =
+    y === nowLocal.getUTCFullYear() && m === nowLocal.getUTCMonth();
+
   const daysInMonth = Math.round((startNext - startCurr) / 86400000);
-  const msElapsed = now - startCurr;
-  const daysElapsed = Math.max(1, msElapsed / 86400000);
+  const msElapsed = isCurrentMonth ? now - startCurr : startNext - startCurr;
+  const daysElapsed = isCurrentMonth ? Math.max(1, msElapsed / 86400000) : daysInMonth;
 
   const agg = (fromD, toD) =>
     baseQuery({
@@ -399,8 +407,8 @@ export async function getMonthlyComparison(f = {}) {
         db.raw("SUM(CASE WHEN call_successful=1 THEN 1 ELSE 0 END) as successful")
       );
 
-  // Mismo punto del mes anterior: desde su día 1 hasta los mismos ms transcurridos.
-  const prevSameEnd = new Date(startPrev.getTime() + msElapsed);
+  // Mes en curso: mismo tramo transcurrido del mes anterior. Mes pasado: mes previo completo.
+  const prevSameEnd = isCurrentMonth ? new Date(startPrev.getTime() + msElapsed) : startCurr;
 
   const [curr, prev, prevSame] = await Promise.all([
     agg(startCurr, startNext),
@@ -411,9 +419,12 @@ export async function getMonthlyComparison(f = {}) {
   const currCost = Number(curr.cost_usd) || 0;
   const prevCost = Number(prev.cost_usd) || 0;
   const prevSameCost = Number(prevSame.cost_usd) || 0;
-  const projected = round((currCost / daysElapsed) * daysInMonth, 2);
+  const projected = isCurrentMonth
+    ? round((currCost / daysElapsed) * daysInMonth, 2)
+    : round(currCost, 2);
 
   return {
+    is_current_month: isCurrentMonth,
     current_month: {
       label: startCurr.toISOString().slice(0, 7),
       calls: Number(curr.calls) || 0,
@@ -423,7 +434,7 @@ export async function getMonthlyComparison(f = {}) {
       days_elapsed: Math.floor(daysElapsed),
       days_in_month: daysInMonth,
       projected_cost_usd: projected,
-      projection_reliable: daysElapsed >= 3,
+      projection_reliable: isCurrentMonth ? daysElapsed >= 3 : true,
     },
     previous_month: {
       label: startPrev.toISOString().slice(0, 7),

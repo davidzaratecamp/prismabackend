@@ -23,6 +23,7 @@ function parseFilters(req) {
     status: q.status,
     sentiment: q.sentiment,
     callSuccessful: q.callSuccessful, // 'true' | 'false' | '1' | '0'
+    month: q.month, // 'YYYY-MM' — solo lo usa monthly-comparison
     allStatuses: q.allStatuses === '1' || q.allStatuses === 'true',
     page: q.page,
     pageSize: q.pageSize,
