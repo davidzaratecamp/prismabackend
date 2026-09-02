@@ -2,6 +2,26 @@ import { db } from '../../db/knex.js';
 
 /* ───────────────────────── helpers ───────────────────────── */
 
+/**
+ * Zona horaria para agrupar por día/hora. Bogotá es UTC−5 todo el año
+ * (sin horario de verano desde 1993), así que un offset fijo es correcto.
+ * Configurable con RETELL_TZ_OFFSET (formato ±HH:MM).
+ */
+const TZ_OFFSET = process.env.RETELL_TZ_OFFSET || '-05:00';
+
+const tzMatch = /^([+-])(\d{2}):(\d{2})$/.exec(TZ_OFFSET) || ['', '-', '05', '00'];
+/** Offset en ms respecto a UTC (Bogotá = −18_000_000). */
+const TZ_OFFSET_MS =
+  (tzMatch[1] === '-' ? -1 : 1) * (Number(tzMatch[2]) * 3600000 + Number(tzMatch[3]) * 60000);
+
+/** Expresión SQL: la columna UTC convertida a hora local. */
+const local = (col = 'started_at') => `CONVERT_TZ(${col}, '+00:00', '${TZ_OFFSET}')`;
+
+/** Instante UTC del inicio (00:00 hora local) de un mes local dado. */
+function localMonthStartUtc(year, monthIdx0) {
+  return new Date(Date.UTC(year, monthIdx0, 1) - TZ_OFFSET_MS);
+}
+
 /** Normaliza cualquier fecha de entrada a 'YYYY-MM-DD HH:MM:SS' UTC. */
 export function toMysqlUtc(v) {
   if (v == null || v === '') return null;
@@ -93,11 +113,11 @@ export async function getOverview(f = {}) {
 
 export async function getCostByDay(f = {}) {
   const rows = await baseQuery(f)
-    .select(db.raw('DATE(started_at) as day'))
+    .select(db.raw(`DATE(${local()}) as day`))
     .count('* as calls')
     .select(db.raw('COALESCE(SUM(combined_cost_usd),0) as cost_usd'))
     .select(db.raw('COALESCE(SUM(duration_seconds),0)/60 as minutes'))
-    .groupByRaw('DATE(started_at)')
+    .groupByRaw(`DATE(${local()})`)
     .orderBy('day', 'asc');
 
   return rows.map((r) => ({
@@ -110,13 +130,13 @@ export async function getCostByDay(f = {}) {
 
 export async function getVolumeByDay(f = {}) {
   const rows = await baseQuery({ ...f, allStatuses: f.allStatuses ?? true })
-    .select(db.raw('DATE(started_at) as day'))
+    .select(db.raw(`DATE(${local()}) as day`))
     .count('* as calls')
     .select(db.raw("SUM(CASE WHEN direction='inbound' THEN 1 ELSE 0 END) as inbound"))
     .select(db.raw("SUM(CASE WHEN direction='outbound' THEN 1 ELSE 0 END) as outbound"))
     .select(db.raw("SUM(CASE WHEN call_status='ended' THEN 1 ELSE 0 END) as ended"))
     .select(db.raw("SUM(CASE WHEN call_status='error' THEN 1 ELSE 0 END) as error"))
-    .groupByRaw('DATE(started_at)')
+    .groupByRaw(`DATE(${local()})`)
     .orderBy('day', 'asc');
 
   return rows.map((r) => ({
@@ -131,9 +151,9 @@ export async function getVolumeByDay(f = {}) {
 
 export async function getVolumeByHour(f = {}) {
   const rows = await baseQuery({ ...f, allStatuses: f.allStatuses ?? true })
-    .select(db.raw('HOUR(started_at) as hour'))
+    .select(db.raw(`HOUR(${local()}) as hour`))
     .count('* as calls')
-    .groupByRaw('HOUR(started_at)')
+    .groupByRaw(`HOUR(${local()})`)
     .orderBy('hour', 'asc');
   return rows.map((r) => ({ hour: Number(r.hour), calls: Number(r.calls) }));
 }
@@ -275,13 +295,13 @@ export async function getLatencyStats(f = {}) {
   };
 }
 
-/** Volumen de llamadas por hora (0-23) y día de semana (0=Lun … 6=Dom), UTC. */
+/** Volumen de llamadas por hora (0-23) y día de semana (0=Lun … 6=Dom), hora local. */
 export async function getHourWeekdayHeatmap(f = {}) {
   const rows = await baseQuery({ ...f, allStatuses: f.allStatuses ?? true })
-    .select(db.raw('HOUR(started_at) as hour'))
-    .select(db.raw('WEEKDAY(started_at) as weekday'))
+    .select(db.raw(`HOUR(${local()}) as hour`))
+    .select(db.raw(`WEEKDAY(${local()}) as weekday`))
     .count('* as calls')
-    .groupByRaw('HOUR(started_at), WEEKDAY(started_at)');
+    .groupByRaw(`HOUR(${local()}), WEEKDAY(${local()})`);
   return rows.map((r) => ({
     hour: Number(r.hour),
     weekday: Number(r.weekday),
@@ -292,7 +312,7 @@ export async function getHourWeekdayHeatmap(f = {}) {
 /** Serie diaria combinada: volumen, éxito y sentimiento (para gráficos de tendencia). */
 export async function getDailyTrend(f = {}) {
   const rows = await baseQuery(f)
-    .select(db.raw('DATE(started_at) as day'))
+    .select(db.raw(`DATE(${local()}) as day`))
     .count('* as calls')
     .select(db.raw('COALESCE(SUM(combined_cost_usd),0) as cost_usd'))
     .select(db.raw("SUM(CASE WHEN call_successful=1 THEN 1 ELSE 0 END) as successful"))
@@ -300,7 +320,7 @@ export async function getDailyTrend(f = {}) {
     .select(db.raw("SUM(CASE WHEN user_sentiment='Positive' THEN 1 ELSE 0 END) as positive"))
     .select(db.raw("SUM(CASE WHEN user_sentiment='Negative' THEN 1 ELSE 0 END) as negative"))
     .select(db.raw("SUM(CASE WHEN user_sentiment IN ('Positive','Negative','Neutral') THEN 1 ELSE 0 END) as sentiment_total"))
-    .groupByRaw('DATE(started_at)')
+    .groupByRaw(`DATE(${local()})`)
     .orderBy('day', 'asc');
 
   return rows.map((r) => {
@@ -348,9 +368,15 @@ export async function getDisconnectionBySuccess(f = {}) {
  */
 export async function getMonthlyComparison(f = {}) {
   const now = new Date();
-  const startCurr = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-  const startPrev = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
-  const startNext = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+  // "Ahora" en hora local, para saber en qué mes/día local estamos.
+  const nowLocal = new Date(now.getTime() + TZ_OFFSET_MS);
+  const y = nowLocal.getUTCFullYear();
+  const m = nowLocal.getUTCMonth();
+
+  // Límites de mes local, expresados como instantes UTC (para comparar contra started_at).
+  const startCurr = localMonthStartUtc(y, m);
+  const startPrev = localMonthStartUtc(y, m - 1);
+  const startNext = localMonthStartUtc(y, m + 1);
 
   const daysInMonth = Math.round((startNext - startCurr) / 86400000);
   const msElapsed = now - startCurr;
