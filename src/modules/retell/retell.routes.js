@@ -21,6 +21,8 @@ function parseFilters(req) {
     direction: q.direction,
     callType: q.callType,
     status: q.status,
+    sentiment: q.sentiment,
+    callSuccessful: q.callSuccessful, // 'true' | 'false' | '1' | '0'
     allStatuses: q.allStatuses === '1' || q.allStatuses === 'true',
     page: q.page,
     pageSize: q.pageSize,
@@ -53,6 +55,10 @@ const analytics = {
   'status-breakdown': service.getStatusBreakdown,
   'duration-buckets': service.getDurationBuckets,
   latency: service.getLatencyStats,
+  heatmap: service.getHourWeekdayHeatmap,
+  'daily-trend': service.getDailyTrend,
+  'disconnection-by-success': service.getDisconnectionBySuccess,
+  'monthly-comparison': service.getMonthlyComparison,
 };
 for (const [path, fn] of Object.entries(analytics)) {
   router.get(

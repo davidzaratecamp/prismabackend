@@ -35,6 +35,12 @@ function baseQuery(f = {}) {
   }
   if (f.direction) q.where('retell_calls.direction', f.direction);
   if (f.callType) q.where('retell_calls.call_type', f.callType);
+  if (f.sentiment) q.where('retell_calls.user_sentiment', f.sentiment);
+  if (f.callSuccessful === true || f.callSuccessful === 'true' || f.callSuccessful === '1') {
+    q.where('retell_calls.call_successful', 1);
+  } else if (f.callSuccessful === false || f.callSuccessful === 'false' || f.callSuccessful === '0') {
+    q.where('retell_calls.call_successful', 0);
+  }
   if (!f.allStatuses) {
     const st = f.status || 'ended';
     q.whereIn('retell_calls.call_status', Array.isArray(st) ? st : [st]);
@@ -148,19 +154,37 @@ export async function getByAgent(f = {}) {
     .select(db.raw('AVG(latency_e2e_p50_ms) as avg_latency_e2e_ms'))
     .select(db.raw("SUM(CASE WHEN call_successful=1 THEN 1 ELSE 0 END) as successful"))
     .select(db.raw("SUM(CASE WHEN call_successful IN (0,1) THEN 1 ELSE 0 END) as analyzed"))
+    .select(db.raw("SUM(CASE WHEN user_sentiment='Positive' THEN 1 ELSE 0 END) as positive"))
+    .select(db.raw("SUM(CASE WHEN user_sentiment='Negative' THEN 1 ELSE 0 END) as negative"))
+    .select(db.raw("SUM(CASE WHEN user_sentiment='Neutral' THEN 1 ELSE 0 END) as neutral"))
+    .select(db.raw("SUM(CASE WHEN direction='inbound' THEN 1 ELSE 0 END) as inbound"))
+    .select(db.raw("SUM(CASE WHEN direction='outbound' THEN 1 ELSE 0 END) as outbound"))
     .orderBy('cost_usd', 'desc');
 
-  return rows.map((r) => ({
-    agent_id: r.agent_id,
-    agent_name: r.agent_name,
-    calls: Number(r.calls),
-    cost_usd: round(r.cost_usd, 4),
-    avg_cost_usd: round(r.avg_cost_usd, 4),
-    minutes: round(r.minutes, 2),
-    avg_duration_seconds: round(r.avg_seconds, 1),
-    avg_latency_e2e_ms: round(r.avg_latency_e2e_ms, 0),
-    success_rate: Number(r.analyzed) ? round(Number(r.successful) / Number(r.analyzed), 4) : null,
-  }));
+  return rows.map((r) => {
+    const analyzed = Number(r.analyzed) || 0;
+    const sentimentTotal = Number(r.positive) + Number(r.negative) + Number(r.neutral);
+    return {
+      agent_id: r.agent_id,
+      agent_name: r.agent_name,
+      calls: Number(r.calls),
+      cost_usd: round(r.cost_usd, 4),
+      avg_cost_usd: round(r.avg_cost_usd, 4),
+      minutes: round(r.minutes, 2),
+      avg_duration_seconds: round(r.avg_seconds, 1),
+      avg_latency_e2e_ms: round(r.avg_latency_e2e_ms, 0),
+      successful: Number(r.successful) || 0,
+      success_rate: analyzed ? round(Number(r.successful) / analyzed, 4) : null,
+      cost_per_successful_usd:
+        Number(r.successful) > 0 ? round(Number(r.cost_usd) / Number(r.successful), 4) : null,
+      inbound: Number(r.inbound) || 0,
+      outbound: Number(r.outbound) || 0,
+      positive: Number(r.positive) || 0,
+      negative: Number(r.negative) || 0,
+      neutral: Number(r.neutral) || 0,
+      positive_rate: sentimentTotal ? round(Number(r.positive) / sentimentTotal, 4) : null,
+    };
+  });
 }
 
 /** Costo por "producto" (tts, llm, telephony…). product_costs es JSON; se agrega en JS. */
@@ -248,6 +272,133 @@ export async function getLatencyStats(f = {}) {
     e2e_p90_avg_ms: round(row.e2e_p90_avg, 0),
     e2e_p90_max_ms: round(row.e2e_p90_max, 0),
     llm_p50_avg_ms: round(row.llm_p50_avg, 0),
+  };
+}
+
+/** Volumen de llamadas por hora (0-23) y día de semana (0=Lun … 6=Dom), UTC. */
+export async function getHourWeekdayHeatmap(f = {}) {
+  const rows = await baseQuery({ ...f, allStatuses: f.allStatuses ?? true })
+    .select(db.raw('HOUR(started_at) as hour'))
+    .select(db.raw('WEEKDAY(started_at) as weekday'))
+    .count('* as calls')
+    .groupByRaw('HOUR(started_at), WEEKDAY(started_at)');
+  return rows.map((r) => ({
+    hour: Number(r.hour),
+    weekday: Number(r.weekday),
+    calls: Number(r.calls),
+  }));
+}
+
+/** Serie diaria combinada: volumen, éxito y sentimiento (para gráficos de tendencia). */
+export async function getDailyTrend(f = {}) {
+  const rows = await baseQuery(f)
+    .select(db.raw('DATE(started_at) as day'))
+    .count('* as calls')
+    .select(db.raw('COALESCE(SUM(combined_cost_usd),0) as cost_usd'))
+    .select(db.raw("SUM(CASE WHEN call_successful=1 THEN 1 ELSE 0 END) as successful"))
+    .select(db.raw("SUM(CASE WHEN call_successful IN (0,1) THEN 1 ELSE 0 END) as analyzed"))
+    .select(db.raw("SUM(CASE WHEN user_sentiment='Positive' THEN 1 ELSE 0 END) as positive"))
+    .select(db.raw("SUM(CASE WHEN user_sentiment='Negative' THEN 1 ELSE 0 END) as negative"))
+    .select(db.raw("SUM(CASE WHEN user_sentiment IN ('Positive','Negative','Neutral') THEN 1 ELSE 0 END) as sentiment_total"))
+    .groupByRaw('DATE(started_at)')
+    .orderBy('day', 'asc');
+
+  return rows.map((r) => {
+    const analyzed = Number(r.analyzed) || 0;
+    const st = Number(r.sentiment_total) || 0;
+    return {
+      day: typeof r.day === 'string' ? r.day.slice(0, 10) : r.day,
+      calls: Number(r.calls),
+      cost_usd: round(r.cost_usd, 4),
+      success_rate: analyzed ? round(Number(r.successful) / analyzed, 4) : null,
+      positive_rate: st ? round(Number(r.positive) / st, 4) : null,
+      negative_rate: st ? round(Number(r.negative) / st, 4) : null,
+    };
+  });
+}
+
+/** Motivo de desconexión cruzado con el resultado (éxito / fallo). */
+export async function getDisconnectionBySuccess(f = {}) {
+  const rows = await baseQuery({ ...f, allStatuses: f.allStatuses ?? true })
+    .select(db.raw("COALESCE(disconnection_reason,'unknown') as reason"))
+    .count('* as total')
+    .select(db.raw("SUM(CASE WHEN call_successful=1 THEN 1 ELSE 0 END) as successful"))
+    .select(db.raw("SUM(CASE WHEN call_successful=0 THEN 1 ELSE 0 END) as failed"))
+    .select(db.raw('COALESCE(AVG(duration_seconds),0) as avg_seconds'))
+    .groupByRaw("COALESCE(disconnection_reason,'unknown')")
+    .orderBy('total', 'desc');
+
+  return rows.map((r) => {
+    const total = Number(r.total) || 0;
+    return {
+      reason: r.reason,
+      total,
+      successful: Number(r.successful) || 0,
+      failed: Number(r.failed) || 0,
+      success_rate: total ? round(Number(r.successful) / total, 4) : null,
+      avg_duration_seconds: round(r.avg_seconds, 1),
+    };
+  });
+}
+
+/**
+ * Compara el mes calendario en curso contra el anterior y proyecta el costo a
+ * fin de mes (regla de tres por días transcurridos). Ignora from/to; respeta
+ * agentId / direction / callType.
+ */
+export async function getMonthlyComparison(f = {}) {
+  const now = new Date();
+  const startCurr = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  const startPrev = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
+  const startNext = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1));
+
+  const daysInMonth = Math.round((startNext - startCurr) / 86400000);
+  const msElapsed = now - startCurr;
+  const daysElapsed = Math.max(1, msElapsed / 86400000);
+
+  const agg = (fromD, toD) =>
+    baseQuery({
+      agentId: f.agentId,
+      direction: f.direction,
+      callType: f.callType,
+      status: f.status,
+      allStatuses: f.allStatuses,
+    })
+      .where('retell_calls.started_at', '>=', toMysqlUtc(fromD))
+      .where('retell_calls.started_at', '<', toMysqlUtc(toD))
+      .first(
+        db.raw('COUNT(*) as calls'),
+        db.raw('COALESCE(SUM(combined_cost_usd),0) as cost_usd'),
+        db.raw('COALESCE(SUM(duration_seconds),0)/60 as minutes'),
+        db.raw("SUM(CASE WHEN call_successful=1 THEN 1 ELSE 0 END) as successful")
+      );
+
+  const [curr, prev] = await Promise.all([agg(startCurr, startNext), agg(startPrev, startCurr)]);
+
+  const currCost = Number(curr.cost_usd) || 0;
+  const prevCost = Number(prev.cost_usd) || 0;
+  const projected = round((currCost / daysElapsed) * daysInMonth, 2);
+
+  return {
+    current_month: {
+      label: startCurr.toISOString().slice(0, 7),
+      calls: Number(curr.calls) || 0,
+      cost_usd: round(currCost, 2),
+      minutes: round(curr.minutes, 1),
+      successful: Number(curr.successful) || 0,
+      days_elapsed: Math.floor(daysElapsed),
+      days_in_month: daysInMonth,
+      projected_cost_usd: projected,
+    },
+    previous_month: {
+      label: startPrev.toISOString().slice(0, 7),
+      calls: Number(prev.calls) || 0,
+      cost_usd: round(prevCost, 2),
+      minutes: round(prev.minutes, 1),
+      successful: Number(prev.successful) || 0,
+    },
+    projected_vs_previous_pct:
+      prevCost > 0 ? round((projected - prevCost) / prevCost, 4) : null,
   };
 }
 
