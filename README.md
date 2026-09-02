@@ -4,6 +4,7 @@ API del gestor de proyectos y módulos del área de Desarrollo de **Asiste Ing**
 
 Frontend: <https://github.com/davidzaratecamp/prismafrontend>
 **Documentación funcional (roles y funciones):** [`DOCUMENTACION.md`](DOCUMENTACION.md)
+**Módulo Analítica Retell IA:** [`DOCUMENTACION-RETELL.md`](DOCUMENTACION-RETELL.md)
 
 ## Stack
 
