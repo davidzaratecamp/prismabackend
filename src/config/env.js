@@ -39,6 +39,15 @@ export const env = {
     email: process.env.SEED_ADMIN_EMAIL || 'admin@prisma.local',
     password: process.env.SEED_ADMIN_PASSWORD || 'PrismaAdmin2026!',
   },
+
+  // Retell AI — analítica de agentes de voz del proveedor de IA (panel solo-admin).
+  // La API key es opcional: sin ella el panel funciona en solo-lectura sobre lo ya
+  // sincronizado y el botón "Sincronizar" responde 503.
+  retell: {
+    apiKey: process.env.RETELL_API_KEY || '',
+    baseUrl: process.env.RETELL_BASE_URL || 'https://api.retellai.com',
+    syncLookbackDays: Number(process.env.RETELL_SYNC_LOOKBACK_DAYS || 90),
+  },
 };
 
 export const isDev = env.nodeEnv === 'development';

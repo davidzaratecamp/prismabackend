@@ -48,6 +48,7 @@ Con `seed:demo` se crean `laura.gomez@`, `diego.ramirez@`, `sara.pena@` (develop
 | `npm run seed` / `seed:demo` | Datos base / de ejemplo |
 | `npm run db:reset` / `db:reset:demo` | rollback + migrate + seed |
 | `npm run recompute` | Recalcula el avance cacheado de todos los proyectos |
+| `npm run retell:sync` | Sincroniza agentes, números y llamadas de Retell AI a MySQL |
 
 ## Roles
 
@@ -103,4 +104,18 @@ PATCH/DELETE /.../tasks/:id                  PATCH /.../tasks/:id/move   (kanban
 GET/POST    /projects/:id/milestones         PATCH/DELETE /.../milestones/:id
 GET    /dashboard/overview    GET /dashboard/areas/:id
 GET    /roadmap               GET /kanban              GET /activity
+GET/POST /retell/*            (solo admin) analítica de Retell AI + POST /retell/sync
 ```
+
+## Retell IA (panel solo-admin)
+
+Analítica de los agentes de voz del proveedor de IA (**Retell**): costos, agentes y
+llamadas. Los datos se sincronizan a MySQL en las tablas `retell_calls`,
+`retell_agents`, `retell_phone_numbers`, `retell_sync_state`.
+
+- Variables en `.env`: `RETELL_API_KEY` (obligatoria para sincronizar; opcional para
+  solo lectura), `RETELL_BASE_URL`, `RETELL_SYNC_LOOKBACK_DAYS`.
+- Sincronizar: `npm run retell:sync` (o el botón **Sincronizar** del panel, que llama
+  `POST /api/retell/sync`). El sync es incremental con solape de 1 h.
+- Todos los endpoints `/api/retell/*` exigen rol `admin`.
+- Costos: Retell entrega centavos de USD; se guarda también el valor en USD.

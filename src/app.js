@@ -13,6 +13,7 @@ import projectsRoutes from './modules/projects/projects.routes.js';
 import dashboardRoutes from './modules/dashboard/dashboard.routes.js';
 import activityRoutes from './modules/activity/activity.routes.js';
 import viewsRoutes from './modules/views/views.routes.js';
+import retellRoutes from './modules/retell/retell.routes.js';
 
 export function createApp() {
   const app = express();
@@ -31,6 +32,7 @@ export function createApp() {
   app.use('/api/projects', projectsRoutes);
   app.use('/api/dashboard', dashboardRoutes);
   app.use('/api/activity', activityRoutes);
+  app.use('/api/retell', retellRoutes);
   app.use('/api', viewsRoutes); // /api/roadmap, /api/kanban
 
   app.use(notFoundHandler);
