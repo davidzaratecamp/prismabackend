@@ -103,16 +103,23 @@ Todos exigen JWT de rol `analista` (los admin no acceden por ahora). Query param
 | `frontend/src/components/layout/AnalystShell.tsx` | Shell del rol `analista` (header + tema + menú de usuario, sin sidebar) |
 | `frontend/src/App.tsx` | 3 ramas de rol: `analista` → AnalystShell · `viewer` → PortalShell · resto → AppShell |
 
-**Pestañas (7):**
+**Pestañas (9):**
 - **Resumen** — 8 KPIs, embudo, llamadas por día, tendencia de éxito/sentimiento, desgloses.
 - **Recorrido** — embudo detallado, transferencias atendidas + no atendidas por día,
   comparativa Hogar vs TyT, clientes que repiten.
+- **Asesor humano** — embudo de negocio completo (transferida → atendida → **ÚTIL
+  POSITIVO / NEGATIVO**, tipificación real del asesor), conversión a UP por día,
+  abandono en cola (`v_abandono`), ranking de asesores (nombres desde VoxPro).
 - **Operación** — llamadas/transferencias por hora (promedio por día operativo) y por
   día de semana; mapa de calor hora × día. Para dimensionar la cola humana.
-- **Conversación** — turnos por llamada (histograma + por desenlace), duración por
-  desenlace, histograma de duración, primera frase del cliente.
+- **Conversación** — ratio de habla SOFIA/cliente (~2,3×), % de "audio ininteligible"
+  (~28%), turnos hasta la transferencia, turnos y duración por desenlace, palabras
+  frecuentes del cliente, cómo abre la petición.
 - **Cruces** — sentimiento × desenlace, tipo de servicio agrupado × transferencia/éxito,
   panel dedicado a `agent_hangup` (Hogar cuelga ~2× más que TyT).
+- **Calidad IA** — snapshot de VoxPro: **score del bot** (cumplimiento de guion),
+  **oportunidad perdida** (`missed_transfer`), **score del asesor** contra la matriz
+  de calidad real de Claro, ranking de asesores con nombre. Ver §7.
 - **Llamadas** — tabla paginada con filtros + detalle con transcripción + audio.
 - **En vivo** — últimas ~25 llamadas de hoy, se refresca cada 20 s.
 
@@ -147,13 +154,30 @@ Todos exigen JWT de rol `analista` (los admin no acceden por ahora). Query param
   plan B: modo híbrido (sync nocturno del histórico + directo sólo el día).
 - **Rol**: crear usuarios `analista` desde *Equipo → Nuevo usuario*.
 
-## 6. Pendientes (fase 2)
+## 7. Calidad IA — integración con VoxPro
 
-- Scores de auditoría IA de VoxPro (`voicebot_call_audits`, `sofia_continuation_audits`):
-  score del bot, "oportunidad perdida" (`missed_transfer`), score del agente humano
-  en la continuación. Requiere exponer un endpoint de solo lectura desde VoxPro
-  (su MySQL no es accesible directo).
-- Mapear las colas de `v_abandono` (3006–3019) a `proyecto_id` para medir abandono
-  en cola humana.
-- Normalizar `TIPO_SERVICIO` (hoy es texto libre: "servicios hogar", "Internet",
-  "Claro Hogar"… todo mezclado).
+Los scores de auditoría IA sólo existen en VoxPro (MySQL de `200.91.204.51`). Los
+dos servidores **no se ven por HTTP** entre sí, así que el flujo es **push**:
+
+```
+VoxPro (job cada 20 min)  ──POST snapshot──▶  Prisma  ──▶  tabla aware_voxpro_snapshot (1 fila)
+  src/jobs/pushPrismaSnapshot.js                 POST /api/aware/voxpro-snapshot (token servicio)
+  src/services/SofiaQualityService.js            GET  /api/aware/analytics/voxpro-quality (rol analista)
+```
+
+- Token compartido: `PRISMA_ANALYTICS_TOKEN` (VoxPro) = `VOXPRO_ANALYTICS_TOKEN` (Prisma).
+- VoxPro también expone `GET /api/prisma-analytics/sofia-quality` con el mismo token
+  (por si algún día hay conectividad directa).
+- El snapshot trae: score del bot por campaña + distribución + `missed_transfer`;
+  continuación humana (`not_found` rate ≈ 28 %, score medio del asesor ≈ 31 — bajo
+  porque cualquier falla de "alto impacto" lo lleva a 0), y ranking de asesores con
+  nombre real.
+- Si el job de VoxPro se cae, el panel muestra "desactualizado hace X min".
+
+## 8. Pendientes
+
+- Mapear las colas de `v_abandono` (3006–3019) a `proyecto_id` para separar el
+  abandono en cola por campaña (hoy es global). Falta el mapeo en la BD de Aware.
+- Normalizar `TIPO_SERVICIO` (hoy texto libre; en el panel ya se agrupa por regex).
+- El usuario `analista` no puede leer `usuario` ni `cdr_custom` en Aware — por eso
+  los nombres de asesor vienen de VoxPro y `cdr_custom` no se usa (sí `v_abandono`).
