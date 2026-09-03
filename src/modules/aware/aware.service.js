@@ -461,6 +461,417 @@ export async function getCall(callId) {
   };
 }
 
+/* ───────────────────────── recorrido / embudo ───────────────────────── */
+
+// subquery LATERAL que busca la continuación humana de una transferencia
+const HUMAN_MATCH = `
+  LEFT JOIN LATERAL (
+    SELECT r.registro_llamada_id AS rid
+    FROM registro_llamada r
+    WHERE v.hangup_reason = 'call_transfer'
+      AND r.proyecto_id = ANY(CASE WHEN v.proyecto_id = 12 THEN ARRAY[7,9] ELSE ARRAY[10,11] END)
+      AND r.registro_llamada_fono  = v.telefono
+      AND r.registro_llamada_fecha = v.fecha
+      AND r.registro_llamada_hora  > v.hora
+      AND r.time_speaking > 0
+    ORDER BY r.registro_llamada_hora
+    LIMIT 1
+  ) h ON true`;
+
+export function getFunnel(f = {}) {
+  const r = resolveFilters(f);
+  return cached(key('funnel', r), 300000, async () => {
+    const [x] = await awareQuery(
+      `SELECT
+         COUNT(*)::int AS entrantes,
+         COUNT(*) FILTER (WHERE v.hangup_reason IS NOT NULL)::int AS conectadas,
+         COUNT(*) FILTER (WHERE v.hangup_reason = 'call_transfer')::int AS transferidas,
+         COUNT(h.rid)::int AS atendidas
+       FROM v_voicebot_result v ${HUMAN_MATCH}
+       WHERE v.proyecto_id = ANY($1::int[]) AND v.fecha BETWEEN $2 AND $3`,
+      baseParams(r)
+    );
+    const entrantes = num(x.entrantes);
+    const conectadas = num(x.conectadas);
+    const transferidas = num(x.transferidas);
+    const atendidas = num(x.atendidas);
+    return {
+      range: { from: r.from, to: r.to },
+      stages: [
+        { key: 'entrantes', label: 'Llamadas entrantes', count: entrantes, of_prev: null },
+        { key: 'conectadas', label: 'Conectaron con el bot', count: conectadas, of_prev: rate(conectadas, entrantes) },
+        { key: 'transferidas', label: 'Transferidas a asesor', count: transferidas, of_prev: rate(transferidas, conectadas) },
+        { key: 'atendidas', label: 'Atendidas por un asesor', count: atendidas, of_prev: rate(atendidas, transferidas) },
+      ],
+      not_attended: transferidas - atendidas,
+      not_attended_rate: rate(transferidas - atendidas, transferidas),
+      approximate: true,
+    };
+  });
+}
+
+export function getNotAttendedByDay(f = {}) {
+  const r = resolveFilters(f);
+  return cached(key('not-attended-by-day', r), 300000, async () => {
+    const rows = await awareQuery(
+      `SELECT v.fecha::text AS day,
+              COUNT(*)::int AS transferidas,
+              COUNT(h.rid)::int AS atendidas
+       FROM v_voicebot_result v ${HUMAN_MATCH}
+       WHERE v.proyecto_id = ANY($1::int[]) AND v.fecha BETWEEN $2 AND $3
+         AND v.hangup_reason = 'call_transfer'
+       GROUP BY v.fecha ORDER BY v.fecha`,
+      baseParams(r)
+    );
+    return rows.map((x) => {
+      const t = num(x.transferidas);
+      const a = num(x.atendidas);
+      return { day: x.day, transferidas: t, atendidas: a, no_atendidas: t - a, atendidas_rate: rate(a, t) };
+    });
+  });
+}
+
+export function getRepeatCallers(f = {}) {
+  const r = resolveFilters(f);
+  return cached(key('repeat-callers', r), 300000, async () => {
+    const [x] = await awareQuery(
+      `SELECT
+         COUNT(*)::int AS numeros,
+         COUNT(*) FILTER (WHERE c >= 2)::int AS repiten,
+         COALESCE(SUM(c) FILTER (WHERE c >= 2), 0)::int AS llamadas_de_repiten
+       FROM (SELECT telefono, COUNT(*) c FROM v_voicebot_result
+             WHERE ${BASE_WHERE} AND telefono IS NOT NULL
+             GROUP BY telefono) s`,
+      baseParams(r)
+    );
+    const top = await awareQuery(
+      `SELECT telefono, COUNT(*)::int AS veces
+       FROM v_voicebot_result
+       WHERE ${BASE_WHERE} AND telefono IS NOT NULL
+       GROUP BY telefono HAVING COUNT(*) >= 2
+       ORDER BY veces DESC LIMIT 15`,
+      baseParams(r)
+    );
+    return {
+      numeros: num(x.numeros),
+      repiten: num(x.repiten),
+      repiten_rate: rate(x.repiten, x.numeros),
+      llamadas_de_repiten: num(x.llamadas_de_repiten),
+      top: top.map((t) => ({ telefono: t.telefono, veces: num(t.veces) })),
+    };
+  });
+}
+
+/* ───────────────────────── operación (por hora / día de semana) ───────────────────────── */
+
+export function getHourlyOps(f = {}) {
+  const r = resolveFilters(f);
+  return cached(key('hourly-ops', r), 60000, async () => {
+    const rows = await awareQuery(
+      `SELECT EXTRACT(HOUR FROM hora)::int AS hour,
+              COUNT(*)::int AS calls,
+              COUNT(*) FILTER (WHERE hangup_reason = 'call_transfer')::int AS transfers,
+              COUNT(DISTINCT fecha)::int AS days
+       FROM v_voicebot_result
+       WHERE ${BASE_WHERE}
+       GROUP BY 1 ORDER BY 1`,
+      baseParams(r)
+    );
+    return rows.map((x) => {
+      const days = Math.max(1, num(x.days));
+      return {
+        hour: num(x.hour),
+        calls: num(x.calls),
+        transfers: num(x.transfers),
+        calls_per_day: Math.round((num(x.calls) / days) * 10) / 10,
+        transfers_per_day: Math.round((num(x.transfers) / days) * 10) / 10,
+        transfer_rate: rate(x.transfers, x.calls),
+      };
+    });
+  });
+}
+
+export function getWeekdayOps(f = {}) {
+  const r = resolveFilters(f);
+  return cached(key('weekday-ops', r), 60000, async () => {
+    const rows = await awareQuery(
+      `SELECT (EXTRACT(ISODOW FROM fecha)::int - 1) AS weekday,
+              COUNT(*)::int AS calls,
+              COUNT(*) FILTER (WHERE hangup_reason = 'call_transfer')::int AS transfers,
+              COUNT(DISTINCT fecha)::int AS days
+       FROM v_voicebot_result
+       WHERE ${BASE_WHERE}
+       GROUP BY 1 ORDER BY 1`,
+      baseParams(r)
+    );
+    const NAMES = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'];
+    return rows.map((x) => {
+      const days = Math.max(1, num(x.days));
+      return {
+        weekday: num(x.weekday),
+        label: NAMES[num(x.weekday)] || String(x.weekday),
+        calls: num(x.calls),
+        transfers: num(x.transfers),
+        days: num(x.days),
+        calls_per_day: Math.round(num(x.calls) / days),
+        transfers_per_day: Math.round(num(x.transfers) / days),
+      };
+    });
+  });
+}
+
+/* ───────────────────────── conversación ───────────────────────── */
+
+export function getTurnBuckets(f = {}) {
+  const r = resolveFilters(f);
+  return cached(key('turn-buckets', r), 120000, async () => {
+    const [x] = await awareQuery(
+      `SELECT
+         COUNT(*) FILTER (WHERE t < 2)::int  AS b0,
+         COUNT(*) FILTER (WHERE t >= 2 AND t < 5)::int   AS b2,
+         COUNT(*) FILTER (WHERE t >= 5 AND t < 10)::int  AS b5,
+         COUNT(*) FILTER (WHERE t >= 10 AND t < 20)::int AS b10,
+         COUNT(*) FILTER (WHERE t >= 20)::int AS b20,
+         COALESCE(ROUND(AVG(t)), 0)::int AS avg_turns,
+         COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY t), 0)::int AS p50
+       FROM (SELECT jsonb_array_length(transcript_object) AS t
+             FROM v_voicebot_result
+             WHERE ${BASE_WHERE} AND transcript_object IS NOT NULL) s`,
+      baseParams(r)
+    );
+    return {
+      avg_turns: num(x.avg_turns),
+      p50_turns: num(x.p50),
+      buckets: [
+        { bucket: '0-1', calls: num(x.b0) },
+        { bucket: '2-4', calls: num(x.b2) },
+        { bucket: '5-9', calls: num(x.b5) },
+        { bucket: '10-19', calls: num(x.b10) },
+        { bucket: '20+', calls: num(x.b20) },
+      ],
+    };
+  });
+}
+
+export function getTurnsByOutcome(f = {}) {
+  const r = resolveFilters(f);
+  return cached(key('turns-by-outcome', r), 120000, async () => {
+    const rows = await awareQuery(
+      `SELECT COALESCE(hangup_reason, 'sin_dato') AS reason,
+              COUNT(*)::int AS calls,
+              COALESCE(ROUND(AVG(jsonb_array_length(transcript_object)), 1), 0) AS avg_turns
+       FROM v_voicebot_result
+       WHERE ${BASE_WHERE} AND transcript_object IS NOT NULL
+       GROUP BY 1 ORDER BY calls DESC`,
+      baseParams(r)
+    );
+    return rows.map((x) => ({ reason: x.reason, calls: num(x.calls), avg_turns: Number(x.avg_turns) || 0 }));
+  });
+}
+
+export function getDurationByOutcome(f = {}) {
+  const r = resolveFilters(f);
+  return cached(key('duration-by-outcome', r), 60000, async () => {
+    const rows = await awareQuery(
+      `SELECT COALESCE(hangup_reason, 'sin_dato') AS reason,
+              COUNT(*)::int AS calls,
+              COALESCE(ROUND(AVG(duracion)), 0)::int AS avg_s,
+              COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY duracion), 0)::int AS p50,
+              COALESCE(PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY duracion), 0)::int AS p90
+       FROM v_voicebot_result
+       WHERE ${BASE_WHERE} AND duracion IS NOT NULL
+       GROUP BY 1 ORDER BY calls DESC`,
+      baseParams(r)
+    );
+    return rows.map((x) => ({
+      reason: x.reason,
+      calls: num(x.calls),
+      avg_seconds: num(x.avg_s),
+      p50_seconds: num(x.p50),
+      p90_seconds: num(x.p90),
+    }));
+  });
+}
+
+export function getFirstUtterances(f = {}) {
+  const r = resolveFilters(f);
+  return cached(key('first-utterances', r), 600000, async () => {
+    const rows = await awareQuery(
+      `SELECT lower(left(trim(elem->>'content'), 70)) AS frase, COUNT(*)::int AS n
+       FROM (
+         SELECT (SELECT e FROM jsonb_array_elements(transcript_object) e
+                 WHERE e->>'role' = 'user' AND length(trim(e->>'content')) > 1
+                 LIMIT 1) AS elem
+         FROM v_voicebot_result
+         WHERE ${BASE_WHERE} AND transcript_object IS NOT NULL
+       ) s
+       WHERE elem IS NOT NULL
+       GROUP BY 1 ORDER BY n DESC LIMIT 25`,
+      baseParams(r)
+    );
+    return rows.filter((x) => x.frase).map((x) => ({ frase: x.frase, calls: num(x.n) }));
+  });
+}
+
+/* ───────────────────────── cruces ───────────────────────── */
+
+export function getSentimentByOutcome(f = {}) {
+  const r = resolveFilters(f);
+  return cached(key('sentiment-by-outcome', r), 60000, async () => {
+    const rows = await awareQuery(
+      `SELECT COALESCE(call_analysis->>'user_sentiment', 'Unknown') AS sentiment,
+              COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE hangup_reason = 'call_transfer')::int AS transfer,
+              COUNT(*) FILTER (WHERE hangup_reason = 'user_hangup')::int  AS user_hangup,
+              COUNT(*) FILTER (WHERE hangup_reason = 'agent_hangup')::int AS agent_hangup,
+              COUNT(*) FILTER (WHERE hangup_reason = 'inactivity')::int   AS inactivity
+       FROM v_voicebot_result
+       WHERE ${BASE_WHERE} AND call_analysis IS NOT NULL
+       GROUP BY 1 ORDER BY total DESC`,
+      baseParams(r)
+    );
+    return rows.map((x) => ({
+      sentiment: x.sentiment,
+      total: num(x.total),
+      transfer: num(x.transfer),
+      user_hangup: num(x.user_hangup),
+      agent_hangup: num(x.agent_hangup),
+      inactivity: num(x.inactivity),
+    }));
+  });
+}
+
+// normaliza el texto libre de TIPO_SERVICIO en grupos
+function serviceGroup(t) {
+  const s = (t || '').toLowerCase();
+  if (!s) return 'sin dato';
+  if (/hogar|internet|servicios hogar|television|tv|fijo/.test(s)) return 'Hogar / Internet';
+  if (/celular|movil|móvil|linea|línea|pospago|prepago|plan/.test(s)) return 'Celular / Móvil';
+  if (/tecnolog|productos tecn|business|plataforma|equipo|dispositiv/.test(s)) return 'Tecnología';
+  if (/cliente|factura|pago|reclamo|soporte|pqr/.test(s)) return 'Servicio al cliente';
+  return 'Otro';
+}
+
+export function getServiceGroups(f = {}) {
+  const r = resolveFilters(f);
+  return cached(key('service-groups', r), 120000, async () => {
+    const rows = await awareQuery(
+      `SELECT lower(trim(call_analysis->'custom_analysis_data'->>'TIPO_SERVICIO')) AS tipo,
+              COUNT(*)::int AS total,
+              COUNT(*) FILTER (WHERE hangup_reason = 'call_transfer')::int AS transfer,
+              COUNT(*) FILTER (WHERE call_analysis->>'call_successful' = 'true')::int AS ok,
+              COUNT(*) FILTER (WHERE call_analysis->>'call_successful' IN ('true','false'))::int AS analyzed
+       FROM v_voicebot_result
+       WHERE ${BASE_WHERE} AND call_analysis IS NOT NULL
+       GROUP BY 1`,
+      baseParams(r)
+    );
+    const acc = new Map();
+    for (const x of rows) {
+      const g = serviceGroup(x.tipo);
+      const e = acc.get(g) || { grupo: g, total: 0, transfer: 0, ok: 0, analyzed: 0 };
+      e.total += num(x.total);
+      e.transfer += num(x.transfer);
+      e.ok += num(x.ok);
+      e.analyzed += num(x.analyzed);
+      acc.set(g, e);
+    }
+    return [...acc.values()]
+      .map((e) => ({
+        grupo: e.grupo,
+        calls: e.total,
+        transfer_rate: rate(e.transfer, e.total),
+        success_rate: rate(e.ok, e.analyzed),
+      }))
+      .sort((a, b) => b.calls - a.calls);
+  });
+}
+
+export function getAgentHangup(f = {}) {
+  const r = resolveFilters(f);
+  return cached(key('agent-hangup', r), 120000, async () => {
+    const forced = { ...r, proyectoIds: BOT_PROY_IDS };
+    const [byProject, byHour, overall, sample] = await Promise.all([
+      awareQuery(
+        `SELECT proyecto_id, COUNT(*)::int AS total,
+                COUNT(*) FILTER (WHERE hangup_reason='agent_hangup')::int AS ah
+         FROM v_voicebot_result WHERE ${BASE_WHERE} GROUP BY proyecto_id`,
+        baseParams(forced)
+      ),
+      awareQuery(
+        `SELECT EXTRACT(HOUR FROM hora)::int AS hour, COUNT(*)::int AS calls
+         FROM v_voicebot_result
+         WHERE ${BASE_WHERE} AND hangup_reason = 'agent_hangup'
+         GROUP BY 1 ORDER BY 1`,
+        baseParams(r)
+      ),
+      awareQuery(
+        `SELECT COUNT(*)::int AS calls,
+                COALESCE(ROUND(AVG(duracion)), 0)::int AS avg_s,
+                COALESCE(ROUND(AVG(jsonb_array_length(transcript_object)), 1), 0) AS avg_turns
+         FROM v_voicebot_result
+         WHERE ${BASE_WHERE} AND hangup_reason = 'agent_hangup'`,
+        baseParams(r)
+      ),
+      awareQuery(
+        `SELECT call_id, proyecto_id, fecha::text AS fecha, hora::text AS hora, duracion,
+                call_analysis->>'call_summary' AS call_summary
+         FROM v_voicebot_result
+         WHERE ${BASE_WHERE} AND hangup_reason = 'agent_hangup'
+           AND call_analysis->>'call_summary' IS NOT NULL
+         ORDER BY fecha DESC, hora DESC LIMIT 10`,
+        baseParams(r)
+      ),
+    ]);
+    return {
+      by_project: byProject.map((x) => ({
+        proyecto_id: x.proyecto_id,
+        name: PROY.bot[x.proyecto_id] || String(x.proyecto_id),
+        calls: num(x.total),
+        agent_hangup: num(x.ah),
+        rate: rate(x.ah, x.total),
+      })),
+      by_hour: byHour.map((x) => ({ hour: num(x.hour), calls: num(x.calls) })),
+      total: num(overall[0]?.calls),
+      avg_seconds: num(overall[0]?.avg_s),
+      avg_turns: Number(overall[0]?.avg_turns) || 0,
+      sample: sample.map((x) => ({
+        call_id: x.call_id,
+        proyecto_name: PROY.bot[x.proyecto_id] || String(x.proyecto_id),
+        fecha: x.fecha,
+        hora: x.hora ? String(x.hora).slice(0, 8) : null,
+        duration_seconds: x.duracion == null ? null : num(x.duracion),
+        call_summary: x.call_summary,
+      })),
+    };
+  });
+}
+
+/* ───────────────────────── en vivo (llamadas de hoy) ───────────────────────── */
+
+export async function getLiveCalls(f = {}) {
+  const proyectoIds =
+    f.proyecto != null && BOT_PROY_IDS.includes(Number(f.proyecto))
+      ? [Number(f.proyecto)]
+      : BOT_PROY_IDS;
+  const today = todayBogota();
+  return cached(`live:${proyectoIds.join(',')}:${today}`, 10000, async () => {
+    const rows = await awareQuery(
+      `SELECT proyecto_id, call_id, fecha::text AS fecha, hora::text AS hora, hangup_reason,
+              duracion, telefono, audiofile,
+              call_analysis->>'user_sentiment'  AS sentiment,
+              call_analysis->>'call_successful' AS call_successful,
+              call_analysis->>'call_summary'    AS call_summary
+       FROM v_voicebot_result
+       WHERE proyecto_id = ANY($1::int[]) AND fecha = $2
+       ORDER BY hora DESC
+       LIMIT 25`,
+      [proyectoIds, today]
+    );
+    return { date: today, rows: rows.map(mapCallRow) };
+  });
+}
+
 export async function getFilterOptions() {
   const [x] = await awareQuery(
     `SELECT MIN(fecha)::text AS min_date, MAX(fecha)::text AS max_date

@@ -54,6 +54,22 @@ const analytics = {
   'duration-buckets': service.getDurationBuckets,
   'by-project': service.getByProject,
   'transfers-attended': service.getTransfersAttended,
+  // recorrido / embudo
+  funnel: service.getFunnel,
+  'not-attended-by-day': service.getNotAttendedByDay,
+  'repeat-callers': service.getRepeatCallers,
+  // operación
+  'hourly-ops': service.getHourlyOps,
+  'weekday-ops': service.getWeekdayOps,
+  // conversación
+  'turn-buckets': service.getTurnBuckets,
+  'turns-by-outcome': service.getTurnsByOutcome,
+  'duration-by-outcome': service.getDurationByOutcome,
+  'first-utterances': service.getFirstUtterances,
+  // cruces
+  'sentiment-by-outcome': service.getSentimentByOutcome,
+  'service-groups': service.getServiceGroups,
+  'agent-hangup': service.getAgentHangup,
 };
 for (const [path, fn] of Object.entries(analytics)) {
   router.get(
@@ -70,6 +86,14 @@ router.get(
   ensureConfigured,
   asyncHandler(async (_req, res) => {
     res.json(await service.getFilterOptions());
+  })
+);
+
+router.get(
+  '/live',
+  ensureConfigured,
+  asyncHandler(async (req, res) => {
+    res.json(await service.getLiveCalls(parseFilters(req)));
   })
 );
 
