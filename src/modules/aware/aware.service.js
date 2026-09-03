@@ -478,6 +478,29 @@ const HUMAN_MATCH = `
     LIMIT 1
   ) h ON true`;
 
+// igual, pero además trae la tipificación de la llamada humana
+const HUMAN_MATCH_TIP = `
+  LEFT JOIN LATERAL (
+    SELECT r.nomenclatura_id AS nom
+    FROM registro_llamada r
+    WHERE v.hangup_reason = 'call_transfer'
+      AND r.proyecto_id = ANY(CASE WHEN v.proyecto_id = 12 THEN ARRAY[7,9] ELSE ARRAY[10,11] END)
+      AND r.registro_llamada_fono  = v.telefono
+      AND r.registro_llamada_fecha = v.fecha
+      AND r.registro_llamada_hora  > v.hora
+      AND r.time_speaking > 0
+    ORDER BY r.registro_llamada_hora
+    LIMIT 1
+  ) h ON true`;
+
+/** Colas de agentes humanos según el filtro de campaña. */
+function humanQueues(proyectoIds) {
+  const set = new Set();
+  if (proyectoIds.includes(12)) [7, 9].forEach((q) => set.add(q));
+  if (proyectoIds.includes(13)) [10, 11].forEach((q) => set.add(q));
+  return [...set];
+}
+
 export function getFunnel(f = {}) {
   const r = resolveFilters(f);
   return cached(key('funnel', r), 300000, async () => {
@@ -844,6 +867,273 @@ export function getAgentHangup(f = {}) {
         call_summary: x.call_summary,
       })),
     };
+  });
+}
+
+/* ───────────────────────── pata del asesor humano ───────────────────────── */
+
+const TIP_LABEL = {
+  UP: 'ÚTIL POSITIVO', UN: 'ÚTIL NEGATIVO', VLL: 'MANIFIESTA INTERÉS',
+  DME: 'VOLVER A LLAMAR', EO: 'CLIENTE OCUPADO', CFA: 'CLIENTE FALLECIDO',
+  FCH: 'FUERA DEL PAÍS', FER: 'FONO NO CORRESPONDE', ABN: 'ABANDONO',
+  NC: 'NO CONTESTA', ND: 'FONO NO DISPONIBLE', ERC: 'ERROR DE CONEXIÓN',
+  FS: 'FUERA DE SERVICIO', GRB: 'GRABADORA', TF: 'TONO FAX', TO: 'TONO OCUPADO',
+};
+
+/** Embudo de negocio completo: transferencia → atendida → tipificación del asesor. */
+export function getHumanOutcomes(f = {}) {
+  const r = resolveFilters(f);
+  return cached(key('human-outcomes', r), 300000, async () => {
+    const rows = await awareQuery(
+      `SELECT tc.nomenclatura_id AS cod,
+              tc.nomenclatura_nombre AS nombre,
+              tc.contacto_efectivo AS efectivo,
+              COUNT(*)::int AS n
+       FROM v_voicebot_result v ${HUMAN_MATCH_TIP}
+       LEFT JOIN tipo_contacto tc ON tc.nomenclatura_id = h.nom
+       WHERE v.proyecto_id = ANY($1::int[]) AND v.fecha BETWEEN $2 AND $3
+         AND v.hangup_reason = 'call_transfer'
+       GROUP BY 1, 2, 3`,
+      baseParams(r)
+    );
+    let transfers = 0;
+    let atendidas = 0;
+    let up = 0;
+    let un = 0;
+    let efectivas = 0;
+    const tip = [];
+    for (const x of rows) {
+      const n = num(x.n);
+      transfers += n;
+      if (x.cod) {
+        atendidas += n;
+        if (x.cod === 'UP') up += n;
+        if (x.cod === 'UN') un += n;
+        if (x.efectivo === 'Contacto Efectivo') efectivas += n;
+        tip.push({ cod: x.cod, nombre: x.nombre || TIP_LABEL[x.cod] || x.cod, efectivo: x.efectivo, calls: n });
+      }
+    }
+    tip.sort((a, b) => b.calls - a.calls);
+    return {
+      range: { from: r.from, to: r.to },
+      transfers,
+      atendidas,
+      sin_atender: transfers - atendidas,
+      atendidas_rate: rate(atendidas, transfers),
+      util_positivo: up,
+      util_negativo: un,
+      conversion_rate: rate(up, atendidas), // UP sobre lo atendido
+      efectivo_rate: rate(efectivas, atendidas),
+      tipificaciones: tip,
+      approximate: true,
+    };
+  });
+}
+
+export function getHumanFunnelByDay(f = {}) {
+  const r = resolveFilters(f);
+  return cached(key('human-funnel-by-day', r), 300000, async () => {
+    const rows = await awareQuery(
+      `SELECT v.fecha::text AS day,
+              COUNT(*)::int AS transferidas,
+              COUNT(h.nom)::int AS atendidas,
+              COUNT(*) FILTER (WHERE h.nom = 'UP')::int AS up
+       FROM v_voicebot_result v ${HUMAN_MATCH_TIP}
+       WHERE v.proyecto_id = ANY($1::int[]) AND v.fecha BETWEEN $2 AND $3
+         AND v.hangup_reason = 'call_transfer'
+       GROUP BY v.fecha ORDER BY v.fecha`,
+      baseParams(r)
+    );
+    return rows.map((x) => ({
+      day: x.day,
+      transferidas: num(x.transferidas),
+      atendidas: num(x.atendidas),
+      util_positivo: num(x.up),
+      conversion_rate: rate(x.up, x.atendidas),
+    }));
+  });
+}
+
+export function getAgentRanking(f = {}) {
+  const r = resolveFilters(f);
+  const queues = humanQueues(r.proyectoIds);
+  return cached(key('agent-ranking', r), 120000, async () => {
+    if (!queues.length) return [];
+    const rows = await awareQuery(
+      `SELECT rl.agente_id,
+              COUNT(*)::int AS calls,
+              COUNT(*) FILTER (WHERE rl.nomenclatura_id = 'UP')::int AS up,
+              COUNT(*) FILTER (WHERE rl.nomenclatura_id = 'UN')::int AS un,
+              COUNT(*) FILTER (WHERE tc.contacto_efectivo = 'Contacto Efectivo')::int AS efectivo
+       FROM registro_llamada rl
+       LEFT JOIN tipo_contacto tc ON tc.nomenclatura_id = rl.nomenclatura_id
+       WHERE rl.proyecto_id = ANY($1::int[])
+         AND rl.registro_llamada_fecha BETWEEN $2 AND $3
+         AND rl.agente_id IS NOT NULL
+       GROUP BY rl.agente_id
+       HAVING COUNT(*) >= 5
+       ORDER BY calls DESC
+       LIMIT 60`,
+      [queues, r.from, r.to]
+    );
+    return rows.map((x) => ({
+      agente_id: x.agente_id,
+      calls: num(x.calls),
+      up: num(x.up),
+      un: num(x.un),
+      up_rate: rate(x.up, x.calls),
+      efectivo_rate: rate(x.efectivo, x.calls),
+    }));
+  });
+}
+
+/* ───────────────────────── abandono en cola (v_abandono) ───────────────────────── */
+
+export function getQueueAbandon(f = {}) {
+  const r = resolveFilters(f);
+  return cached(key('queue-abandon', { proyectoIds: [0], from: r.from, to: r.to }), 120000, async () => {
+    const [[tot], byDay, byQueue] = await Promise.all([
+      awareQuery(
+        `SELECT COUNT(*)::int AS total,
+                COALESCE(ROUND(AVG(tiempo_espera)), 0)::int AS avg_espera,
+                COALESCE(ROUND(MAX(tiempo_espera)), 0)::int AS max_espera
+         FROM v_abandono WHERE fecha BETWEEN $1 AND $2`,
+        [r.from, r.to]
+      ),
+      awareQuery(
+        `SELECT fecha::text AS day, COUNT(*)::int AS abandonos,
+                COALESCE(ROUND(AVG(tiempo_espera)), 0)::int AS avg_espera
+         FROM v_abandono WHERE fecha BETWEEN $1 AND $2
+         GROUP BY fecha ORDER BY fecha`,
+        [r.from, r.to]
+      ),
+      awareQuery(
+        `SELECT cola, COUNT(*)::int AS abandonos
+         FROM v_abandono WHERE fecha BETWEEN $1 AND $2
+         GROUP BY cola ORDER BY abandonos DESC LIMIT 12`,
+        [r.from, r.to]
+      ),
+    ]);
+    return {
+      total: num(tot?.total),
+      avg_espera_s: num(tot?.avg_espera),
+      max_espera_s: num(tot?.max_espera),
+      by_day: byDay.map((x) => ({ day: x.day, abandonos: num(x.abandonos), avg_espera_s: num(x.avg_espera) })),
+      by_queue: byQueue.map((x) => ({ cola: x.cola, abandonos: num(x.abandonos) })),
+      note: 'Las colas de Asterisk no están mapeadas a campaña; el dato es del conjunto de colas humanas.',
+    };
+  });
+}
+
+/* ───────────────────────── conversación profunda ───────────────────────── */
+
+const STOP = [
+  'audio', 'unintelligible', 'entonces', 'tambien', 'también', 'porque', 'ustedes',
+  'nosotros', 'señora', 'señor', 'gracias', 'buenos', 'buenas', 'tardes', 'noches',
+  'estaba', 'estoy', 'estás', 'estamos', 'tengo', 'quiero', 'necesito', 'llamando',
+  'ahorita', 'listo', 'bueno', 'perfecto', 'correcto', 'digame', 'dígame', 'pues',
+  'favor', 'saber', 'hacer', 'puedo', 'puede', 'usted', 'comunicarme', 'entiendo',
+  'disculpe', 'perdon', 'perdón', 'entonce', 'claro', 'sería', 'seria', 'hola',
+];
+
+export function getTalkRatio(f = {}) {
+  const r = resolveFilters(f);
+  return cached(key('talk-ratio', r), 120000, async () => {
+    const [x] = await awareQuery(
+      `SELECT
+         SUM(CASE WHEN turn->>'role' = 'agent' THEN wc ELSE 0 END)::bigint AS agent_words,
+         SUM(CASE WHEN turn->>'role' = 'user'  THEN wc ELSE 0 END)::bigint AS user_words,
+         COUNT(DISTINCT v.call_id)::int AS calls,
+         COUNT(DISTINCT v.call_id) FILTER (WHERE turn->>'content' ILIKE '%unintelligible%')::int AS calls_ruido
+       FROM v_voicebot_result v,
+            LATERAL jsonb_array_elements(v.transcript_object) turn,
+            LATERAL (SELECT COALESCE(array_length(regexp_split_to_array(trim(turn->>'content'), '\\s+'), 1), 0) AS wc) w
+       WHERE ${BASE_WHERE} AND transcript_object IS NOT NULL`,
+      baseParams(r)
+    );
+    const agent = Number(x.agent_words) || 0;
+    const user = Number(x.user_words) || 0;
+    const calls = num(x.calls);
+    return {
+      agent_words: agent,
+      user_words: user,
+      ratio: user ? Math.round((agent / user) * 100) / 100 : null,
+      avg_agent_words: calls ? Math.round(agent / calls) : 0,
+      avg_user_words: calls ? Math.round(user / calls) : 0,
+      calls,
+      calls_con_audio_ininteligible: num(x.calls_ruido),
+      ininteligible_rate: rate(x.calls_ruido, calls),
+    };
+  });
+}
+
+export function getTransferTurnBuckets(f = {}) {
+  const r = resolveFilters(f);
+  return cached(key('transfer-turn-buckets', r), 120000, async () => {
+    const [x] = await awareQuery(
+      `SELECT
+         COUNT(*) FILTER (WHERE t < 4)::int   AS b0,
+         COUNT(*) FILTER (WHERE t >= 4 AND t < 8)::int   AS b4,
+         COUNT(*) FILTER (WHERE t >= 8 AND t < 14)::int  AS b8,
+         COUNT(*) FILTER (WHERE t >= 14 AND t < 22)::int AS b14,
+         COUNT(*) FILTER (WHERE t >= 22)::int AS b22,
+         COALESCE(ROUND(AVG(t)), 0)::int AS avg_turns
+       FROM (SELECT jsonb_array_length(transcript_object) AS t
+             FROM v_voicebot_result
+             WHERE ${BASE_WHERE} AND hangup_reason = 'call_transfer' AND transcript_object IS NOT NULL) s`,
+      baseParams(r)
+    );
+    return {
+      avg_turns: num(x.avg_turns),
+      buckets: [
+        { bucket: '0-3', calls: num(x.b0) },
+        { bucket: '4-7', calls: num(x.b4) },
+        { bucket: '8-13', calls: num(x.b8) },
+        { bucket: '14-21', calls: num(x.b14) },
+        { bucket: '22+', calls: num(x.b22) },
+      ],
+    };
+  });
+}
+
+export function getTopicKeywords(f = {}) {
+  const r = resolveFilters(f);
+  return cached(key('topic-keywords', r), 600000, async () => {
+    const rows = await awareQuery(
+      `SELECT w, COUNT(*)::int AS n FROM (
+         SELECT lower(unnest(regexp_split_to_array(
+                  regexp_replace(trim(turn->>'content'), '[[:punct:]¿¡]', ' ', 'g'), '\\s+'))) AS w
+         FROM v_voicebot_result v, LATERAL jsonb_array_elements(v.transcript_object) turn
+         WHERE ${BASE_WHERE} AND transcript_object IS NOT NULL AND turn->>'role' = 'user'
+       ) s
+       WHERE length(w) >= 5 AND w <> ALL($4::text[])
+       GROUP BY 1 ORDER BY n DESC LIMIT 30`,
+      [...baseParams(r), STOP]
+    );
+    return rows.map((x) => ({ palabra: x.w, calls: num(x.n) }));
+  });
+}
+
+export function getFirstIntent(f = {}) {
+  const r = resolveFilters(f);
+  return cached(key('first-intent', r), 600000, async () => {
+    const rows = await awareQuery(
+      `SELECT lower(left(trim(elem->>'content'), 90)) AS frase, COUNT(*)::int AS n
+       FROM (
+         SELECT (SELECT e FROM jsonb_array_elements(transcript_object) e
+                 WHERE e->>'role' = 'user'
+                   AND length(trim(e->>'content')) > 18
+                   AND e->>'content' NOT ILIKE '%unintelligible%'
+                   AND lower(trim(e->>'content')) !~ '^(bien|muy bien|hola|al[oó]|buen[oa]s|todo bien|gracias|excelente|ac[aá]|aqu[ií]|s[ií][ ,.]|no[ ,.]|ok|listo|correcto)'
+                 LIMIT 1) AS elem
+         FROM v_voicebot_result
+         WHERE ${BASE_WHERE} AND transcript_object IS NOT NULL
+       ) s
+       WHERE elem IS NOT NULL
+       GROUP BY 1 ORDER BY n DESC LIMIT 25`,
+      baseParams(r)
+    );
+    return rows.filter((x) => x.frase).map((x) => ({ frase: x.frase, calls: num(x.n) }));
   });
 }
 

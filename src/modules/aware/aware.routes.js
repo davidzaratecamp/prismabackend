@@ -70,6 +70,16 @@ const analytics = {
   'sentiment-by-outcome': service.getSentimentByOutcome,
   'service-groups': service.getServiceGroups,
   'agent-hangup': service.getAgentHangup,
+  // pata del asesor humano
+  'human-outcomes': service.getHumanOutcomes,
+  'human-funnel-by-day': service.getHumanFunnelByDay,
+  'agent-ranking': service.getAgentRanking,
+  'queue-abandon': service.getQueueAbandon,
+  // conversación profunda
+  'talk-ratio': service.getTalkRatio,
+  'transfer-turn-buckets': service.getTransferTurnBuckets,
+  'topic-keywords': service.getTopicKeywords,
+  'first-intent': service.getFirstIntent,
 };
 for (const [path, fn] of Object.entries(analytics)) {
   router.get(
