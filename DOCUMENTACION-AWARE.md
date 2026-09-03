@@ -1,12 +1,11 @@
 # Módulo: Analítica Aware / SOFIA
 
 Tablero de analítica del **inbound de Claro Hogar y Claro TyT** atendido por el
-voicebot **SOFIA** sobre **Aware**. Interfaz única para el rol **`analista`**
-(los `admin` también la ven).
+voicebot **SOFIA** sobre **Aware**. Interfaz única y **exclusiva del rol
+`analista`** (por ahora los `admin` no acceden).
 
 - **Rol `analista`** → al iniciar sesión cae directo en este panel (`AnalystShell`),
   sin acceso a la app de Desarrollo ni al Portal.
-- **Admin** → lo abre desde el sidebar: *Analítica Aware* → `/admin/aware`.
 - **Datos en vivo**: se consulta directo la BD PostgreSQL de Aware (solo lectura)
   con un caché de 60 s; el front refresca cada 60 s. No hay sincronización.
 
@@ -23,9 +22,9 @@ Aware PostgreSQL (asiste.awareccm.com:5432, db awareccm, user analista, solo lec
         ▼
 backend/src/modules/aware/  (pool pg + caché TTL + agregaciones SQL)
         ▼
-GET /api/aware/*   (requireRole('admin','analista'))
+GET /api/aware/*   (requireRole('analista'))
         ▼
-frontend  AwarePage  +  AnalystShell  (rol analista) / sidebar (admin)
+frontend  AwarePage  +  AnalystShell  (rol analista)
 ```
 
 - Conexión directa por internet, **sin túnel SSH y sin SSL** (igual que VoxPro).
@@ -40,7 +39,7 @@ frontend  AwarePage  +  AnalystShell  (rol analista) / sidebar (admin)
 | `aware.db.js` | Pool `pg` (`max: 4`, `statement_timeout: 15s`), `awareQuery()`, `isAwareConfigured()`, IDs de cola |
 | `aware.cache.js` | Caché en memoria con TTL — 60 s para agregados, 300 s para el heurístico de transferencias |
 | `aware.service.js` | ~14 funciones de agregación (SQL sobre `v_voicebot_result` / `registro_llamada`) |
-| `aware.routes.js` | Router en `/api/aware`, `requireAuth + requireRole('admin','analista')` |
+| `aware.routes.js` | Router en `/api/aware`, `requireAuth + requireRole('analista')` |
 
 Migración `20260903120000_add_analista_role.js` — amplía el enum `users.role` a
 `('admin','developer','viewer','analista')`.
@@ -58,7 +57,7 @@ Migración `20260903120000_add_analista_role.js` — amplía el enum `users.role
 
 ### Endpoints (`/api/aware`)
 
-Todos exigen JWT de rol `admin` o `analista`. Query params comunes:
+Todos exigen JWT de rol `analista` (los admin no acceden por ahora). Query params comunes:
 `from`, `to` (`YYYY-MM-DD`, hora Colombia), `proyecto` (`12` Hogar | `13` TyT | omitido = ambas).
 
 | Endpoint | Devuelve |

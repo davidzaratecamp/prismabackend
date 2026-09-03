@@ -7,8 +7,8 @@ import * as service from './aware.service.js';
 
 const router = Router();
 
-// Panel para el rol `analista` (y los admin).
-router.use(requireAuth, requireRole('admin', 'analista'));
+// Panel exclusivo del rol `analista` (por ahora los admin no acceden aquí).
+router.use(requireAuth, requireRole('analista'));
 
 // Todo lo que consulta Aware exige la conexión configurada.
 function ensureConfigured(_req, _res, next) {

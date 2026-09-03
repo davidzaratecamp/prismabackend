@@ -108,7 +108,7 @@ GET/POST    /projects/:id/milestones         PATCH/DELETE /.../milestones/:id
 GET    /dashboard/overview    GET /dashboard/areas/:id
 GET    /roadmap               GET /kanban              GET /activity
 GET/POST /retell/*            (solo admin) analítica de Retell AI + POST /retell/sync
-GET     /aware/*             (admin + analista) analítica Aware/SOFIA (consulta directa a Postgres)
+GET     /aware/*             (solo rol analista) analítica Aware/SOFIA (consulta directa a Postgres)
 ```
 
 ## Retell IA (panel solo-admin)
