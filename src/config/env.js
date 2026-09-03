@@ -48,6 +48,18 @@ export const env = {
     baseUrl: process.env.RETELL_BASE_URL || 'https://api.retellai.com',
     syncLookbackDays: Number(process.env.RETELL_SYNC_LOOKBACK_DAYS || 90),
   },
+
+  // Aware / SOFIA — analítica de inbound Claro Hogar y TyT (rol `analista`).
+  // Consulta directa (solo lectura) a la BD PostgreSQL de Aware. Opcional: sin
+  // AWARE_DB_HOST el panel responde 503.
+  aware: {
+    host: process.env.AWARE_DB_HOST || '',
+    port: Number(process.env.AWARE_DB_PORT || 5432),
+    database: process.env.AWARE_DB_NAME || 'awareccm',
+    user: process.env.AWARE_DB_USER || 'analista',
+    password: process.env.AWARE_DB_PASSWORD || '',
+    audioBaseUrl: process.env.AWARE_AUDIO_BASE_URL || 'https://asiste.awareccm.com/audiofiles',
+  },
 };
 
 export const isDev = env.nodeEnv === 'development';

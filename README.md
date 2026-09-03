@@ -5,6 +5,7 @@ API del gestor de proyectos y módulos del área de Desarrollo de **Asiste Ing**
 Frontend: <https://github.com/davidzaratecamp/prismafrontend>
 **Documentación funcional (roles y funciones):** [`DOCUMENTACION.md`](DOCUMENTACION.md)
 **Módulo Analítica Retell IA:** [`DOCUMENTACION-RETELL.md`](DOCUMENTACION-RETELL.md)
+**Módulo Analítica Aware / SOFIA (rol `analista`):** [`DOCUMENTACION-AWARE.md`](DOCUMENTACION-AWARE.md)
 
 ## Stack
 
@@ -57,7 +58,8 @@ Con `seed:demo` se crean `laura.gomez@`, `diego.ramirez@`, `sara.pena@` (develop
 |---|---|
 | `admin` | Todo, incluidas gestión de usuarios y áreas |
 | `developer` | Crear y editar proyectos, módulos, tareas e hitos |
-| `viewer` | Solo lectura de todas las áreas |
+| `viewer` | Solo lectura de todas las áreas (Portal) |
+| `analista` | Solo el panel de Analítica Aware / SOFIA (ver `DOCUMENTACION-AWARE.md`) |
 
 ## Cálculo de avance
 
@@ -106,6 +108,7 @@ GET/POST    /projects/:id/milestones         PATCH/DELETE /.../milestones/:id
 GET    /dashboard/overview    GET /dashboard/areas/:id
 GET    /roadmap               GET /kanban              GET /activity
 GET/POST /retell/*            (solo admin) analítica de Retell AI + POST /retell/sync
+GET     /aware/*             (admin + analista) analítica Aware/SOFIA (consulta directa a Postgres)
 ```
 
 ## Retell IA (panel solo-admin)

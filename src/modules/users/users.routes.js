@@ -41,7 +41,7 @@ const createSchema = z.object({
   name: z.string().min(2).max(120),
   email: z.string().email().max(190),
   password: z.string().min(8),
-  role: z.enum(['admin', 'developer', 'viewer']),
+  role: z.enum(['admin', 'developer', 'viewer', 'analista']),
   area_id: z.number().int().positive().nullable().optional(),
 });
 
@@ -77,7 +77,7 @@ router.post(
 const updateSchema = z.object({
   name: z.string().min(2).max(120).optional(),
   email: z.string().email().max(190).optional(),
-  role: z.enum(['admin', 'developer', 'viewer']).optional(),
+  role: z.enum(['admin', 'developer', 'viewer', 'analista']).optional(),
   area_id: z.number().int().positive().nullable().optional(),
   is_active: z.boolean().optional(),
   password: z.string().min(8).optional(),
