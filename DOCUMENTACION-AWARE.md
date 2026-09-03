@@ -75,7 +75,20 @@ Todos exigen JWT de rol `analista` (los admin no acceden por ahora). Query param
 | `GET /analytics/duration-buckets` | histograma de duración |
 | `GET /analytics/by-project` | Hogar vs TyT lado a lado |
 | `GET /analytics/transfers-attended` | transferencias atendidas vs no atendidas por un asesor (heurístico, ver §4) |
+| `GET /analytics/funnel` | embudo entrantes → conectadas → transferidas → atendidas |
+| `GET /analytics/not-attended-by-day` | transferencias atendidas/no atendidas por día |
+| `GET /analytics/repeat-callers` | clientes que llamaron ≥2 veces en el rango |
+| `GET /analytics/hourly-ops` | llamadas y transferencias por hora, promedio por día operativo |
+| `GET /analytics/weekday-ops` | ídem por día de semana |
+| `GET /analytics/turn-buckets` | histograma de turnos de conversación (`jsonb_array_length(transcript_object)`) |
+| `GET /analytics/turns-by-outcome` | turnos promedio según `hangup_reason` |
+| `GET /analytics/duration-by-outcome` | duración avg/P50/P90 según `hangup_reason` |
+| `GET /analytics/first-utterances` | primera frase del cliente (literal, ruidoso) — caché 10 min |
+| `GET /analytics/sentiment-by-outcome` | sentimiento × `hangup_reason` |
+| `GET /analytics/service-groups` | `TIPO_SERVICIO` agrupado (mapa en JS) × transferencia/éxito |
+| `GET /analytics/agent-hangup` | foco en `agent_hangup`: por campaña, por hora, muestras de resumen |
 | `GET /analytics/filters` | rango de fechas + campañas |
+| `GET /live` | últimas 25 llamadas de **hoy** (caché 10 s) — pestaña "En vivo" |
 | `GET /calls` | tabla paginada (`page`, `pageSize`, `hangup`, `phone`, `sentiment`, `callSuccessful`) |
 | `GET /calls/:id` | detalle: análisis, transcripción turno a turno, URL de audio |
 
@@ -90,14 +103,18 @@ Todos exigen JWT de rol `analista` (los admin no acceden por ahora). Query param
 | `frontend/src/components/layout/AnalystShell.tsx` | Shell del rol `analista` (header + tema + menú de usuario, sin sidebar) |
 | `frontend/src/App.tsx` | 3 ramas de rol: `analista` → AnalystShell · `viewer` → PortalShell · resto → AppShell |
 
-**Pestañas:**
-- **Resumen** — 8 KPIs, llamadas por día (Hogar/TyT apiladas + línea de transferidas),
-  tendencia de éxito/sentimiento, desgloses (cierre, sentimiento, tipo de servicio).
-- **Flujo y transferencias** — motivo de cierre, transferencias atendidas vs no
-  atendidas, comparativa Hogar vs TyT.
-- **Actividad** — mapa de calor hora × día, histograma de duración.
-- **Llamadas** — tabla paginada con filtros (cierre, sentimiento, éxito, teléfono)
-  y detalle con transcripción + reproductor de audio.
+**Pestañas (7):**
+- **Resumen** — 8 KPIs, embudo, llamadas por día, tendencia de éxito/sentimiento, desgloses.
+- **Recorrido** — embudo detallado, transferencias atendidas + no atendidas por día,
+  comparativa Hogar vs TyT, clientes que repiten.
+- **Operación** — llamadas/transferencias por hora (promedio por día operativo) y por
+  día de semana; mapa de calor hora × día. Para dimensionar la cola humana.
+- **Conversación** — turnos por llamada (histograma + por desenlace), duración por
+  desenlace, histograma de duración, primera frase del cliente.
+- **Cruces** — sentimiento × desenlace, tipo de servicio agrupado × transferencia/éxito,
+  panel dedicado a `agent_hangup` (Hogar cuelga ~2× más que TyT).
+- **Llamadas** — tabla paginada con filtros + detalle con transcripción + audio.
+- **En vivo** — últimas ~25 llamadas de hoy, se refresca cada 20 s.
 
 ## 4. Cómo interpretar los datos
 
