@@ -1,5 +1,6 @@
 import { awareQuery, isAwareConfigured, PROY, BOT_PROY_IDS, AUDIO_BASE_URL } from './aware.db.js';
 import { cached } from './aware.cache.js';
+import { db } from '../../db/knex.js'; // MySQL (prisma_db) — sólo para el snapshot de VoxPro
 
 /* ───────────────────────── helpers ───────────────────────── */
 
@@ -1173,6 +1174,31 @@ export async function getFilterOptions() {
     max_date: x?.max_date || null,
     projects: BOT_PROY_IDS.map((id) => ({ proyecto_id: id, name: PROY.bot[id] })),
   };
+}
+
+/* ───────────────────────── calidad IA (snapshot que empuja VoxPro) ───────────────────────── */
+
+export async function saveVoxproSnapshot(payload) {
+  const row = { id: 1, payload: JSON.stringify(payload), updated_at: db.fn.now() };
+  await db('aware_voxpro_snapshot').insert(row).onConflict('id').merge(row);
+}
+
+export async function getVoxproQuality() {
+  const row = await db('aware_voxpro_snapshot').where({ id: 1 }).first();
+  if (!row) return { available: false };
+  let payload = row.payload;
+  if (typeof payload === 'string') {
+    try {
+      payload = JSON.parse(payload);
+    } catch {
+      payload = null;
+    }
+  }
+  // La edad se calcula desde generated_at del payload (ISO UTC real de VoxPro),
+  // no desde updated_at de MySQL (ambigüedad de zona).
+  const gen = payload && payload.generated_at ? new Date(payload.generated_at) : null;
+  const ageMin = gen && !Number.isNaN(gen.getTime()) ? Math.round((Date.now() - gen.getTime()) / 60000) : null;
+  return { available: !!payload, age_minutes: ageMin, ...payload };
 }
 
 export async function getConfig() {

@@ -59,6 +59,8 @@ export const env = {
     user: process.env.AWARE_DB_USER || 'analista',
     password: process.env.AWARE_DB_PASSWORD || '',
     audioBaseUrl: process.env.AWARE_AUDIO_BASE_URL || 'https://asiste.awareccm.com/audiofiles',
+    // Token compartido con VoxPro para recibir el snapshot de calidad IA (push).
+    voxproToken: process.env.VOXPRO_ANALYTICS_TOKEN || '',
   },
 };
 

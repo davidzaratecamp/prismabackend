@@ -2,10 +2,26 @@ import { Router } from 'express';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { requireAuth, requireRole } from '../../middleware/auth.js';
 import { HttpError } from '../../utils/httpError.js';
+import { env } from '../../config/env.js';
 import { isAwareConfigured } from './aware.db.js';
 import * as service from './aware.service.js';
 
 const router = Router();
+
+// ── Ingesta del snapshot de calidad IA que empuja VoxPro (servicio a servicio,
+//    token compartido, sin JWT de usuario). VA ANTES del guard de rol. ──
+router.post(
+  '/voxpro-snapshot',
+  asyncHandler(async (req, res) => {
+    const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+    if (!env.aware.voxproToken || token !== env.aware.voxproToken) {
+      throw new HttpError(401, 'token de servicio inválido');
+    }
+    if (!req.body || typeof req.body !== 'object') throw new HttpError(400, 'payload inválido');
+    await service.saveVoxproSnapshot(req.body);
+    res.json({ ok: true });
+  })
+);
 
 // Panel exclusivo del rol `analista` (por ahora los admin no acceden aquí).
 router.use(requireAuth, requireRole('analista'));
@@ -96,6 +112,15 @@ router.get(
   ensureConfigured,
   asyncHandler(async (_req, res) => {
     res.json(await service.getFilterOptions());
+  })
+);
+
+// Calidad IA (score bot/asesor, oportunidad perdida, nombres) — snapshot de VoxPro.
+// No exige AWARE_DB_* (vive en MySQL local).
+router.get(
+  '/analytics/voxpro-quality',
+  asyncHandler(async (_req, res) => {
+    res.json(await service.getVoxproQuality());
   })
 );
 
