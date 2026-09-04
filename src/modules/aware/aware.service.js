@@ -96,6 +96,103 @@ export function getOverview(f = {}) {
   });
 }
 
+/**
+ * Estadísticas base (bot) de un tramo de fechas — usado por getOverview y por
+ * la comparación de periodos.
+ */
+async function botStatsFor(proyectoIds, from, to) {
+  const [row] = await awareQuery(
+    `SELECT
+       COUNT(*)::int AS total,
+       COUNT(*) FILTER (WHERE hangup_reason = 'call_transfer')::int AS transfer,
+       COUNT(*) FILTER (WHERE hangup_reason = 'user_hangup')::int  AS user_hangup,
+       COUNT(*) FILTER (WHERE hangup_reason = 'agent_hangup')::int AS agent_hangup,
+       COUNT(*) FILTER (WHERE hangup_reason = 'inactivity')::int   AS inactivity,
+       COALESCE(ROUND(AVG(duracion)), 0)::int AS avg_dur,
+       COUNT(*) FILTER (WHERE call_analysis->>'user_sentiment' = 'Positive')::int AS pos,
+       COUNT(*) FILTER (WHERE call_analysis->>'user_sentiment' IN ('Positive','Negative','Neutral'))::int AS sent_total,
+       COUNT(*) FILTER (WHERE call_analysis->>'call_successful' = 'true')::int AS ok,
+       COUNT(*) FILTER (WHERE call_analysis->>'call_successful' IN ('true','false'))::int AS analyzed
+     FROM v_voicebot_result
+     WHERE proyecto_id = ANY($1::int[]) AND fecha BETWEEN $2 AND $3`,
+    [proyectoIds, from, to]
+  );
+  const total = num(row.total);
+  return {
+    from,
+    to,
+    total_calls: total,
+    transfer_rate: rate(row.transfer, total),
+    user_hangup_rate: rate(row.user_hangup, total),
+    agent_hangup_rate: rate(row.agent_hangup, total),
+    inactivity_rate: rate(row.inactivity, total),
+    avg_duration_seconds: num(row.avg_dur),
+    positive_rate: rate(row.pos, row.sent_total),
+    success_rate: rate(row.ok, row.analyzed),
+  };
+}
+
+/** Conversión real (asesor humano) de un tramo de fechas — versión ligera. */
+async function humanStatsFor(proyectoIds, from, to) {
+  const [row] = await awareQuery(
+    `SELECT COUNT(*)::int AS transfers,
+            COUNT(h.nom)::int AS atendidas,
+            COUNT(*) FILTER (WHERE h.nom = 'UP')::int AS up
+     FROM v_voicebot_result v ${HUMAN_MATCH_TIP}
+     WHERE v.proyecto_id = ANY($1::int[]) AND v.fecha BETWEEN $2 AND $3
+       AND v.hangup_reason = 'call_transfer'`,
+    [proyectoIds, from, to]
+  );
+  const transfers = num(row.transfers);
+  const atendidas = num(row.atendidas);
+  return {
+    transfers,
+    atendidas,
+    atendidas_rate: rate(atendidas, transfers),
+    conversion_rate: rate(row.up, atendidas), // UP sobre lo atendido
+  };
+}
+
+/**
+ * Compara el rango elegido contra el tramo inmediatamente anterior de la misma
+ * duración (p. ej. "últimos 7 días" vs. los 7 días previos a esos).
+ */
+export function getPeriodComparison(f = {}) {
+  const r = resolveFilters(f);
+  return cached(key('period-comparison', r), 120000, async () => {
+    const days = Math.round((new Date(`${r.to}T00:00:00Z`) - new Date(`${r.from}T00:00:00Z`)) / 86400000) + 1;
+    const prevTo = addDays(r.from, -1);
+    const prevFrom = addDays(prevTo, -(days - 1));
+
+    const [curBot, prevBot, curHuman, prevHuman] = await Promise.all([
+      botStatsFor(r.proyectoIds, r.from, r.to),
+      botStatsFor(r.proyectoIds, prevFrom, prevTo),
+      humanStatsFor(r.proyectoIds, r.from, r.to),
+      humanStatsFor(r.proyectoIds, prevFrom, prevTo),
+    ]);
+
+    // diferencia en puntos porcentuales (o null si algún lado no tiene dato)
+    const ppDelta = (cur, prev) => (cur == null || prev == null ? null : Math.round((cur - prev) * 10000) / 10000);
+    const pctDelta = (cur, prev) => (prev ? Math.round(((cur - prev) / prev) * 10000) / 10000 : null);
+
+    return {
+      days,
+      current: { ...curBot, ...curHuman },
+      previous: { ...prevBot, ...prevHuman },
+      deltas: {
+        total_calls_pct: pctDelta(curBot.total_calls, prevBot.total_calls),
+        transfer_rate_pp: ppDelta(curBot.transfer_rate, prevBot.transfer_rate),
+        user_hangup_rate_pp: ppDelta(curBot.user_hangup_rate, prevBot.user_hangup_rate),
+        agent_hangup_rate_pp: ppDelta(curBot.agent_hangup_rate, prevBot.agent_hangup_rate),
+        success_rate_pp: ppDelta(curBot.success_rate, prevBot.success_rate),
+        positive_rate_pp: ppDelta(curBot.positive_rate, prevBot.positive_rate),
+        conversion_rate_pp: ppDelta(curHuman.conversion_rate, prevHuman.conversion_rate),
+        atendidas_rate_pp: ppDelta(curHuman.atendidas_rate, prevHuman.atendidas_rate),
+      },
+    };
+  });
+}
+
 /* ───────────────────────── series ───────────────────────── */
 
 export function getVolumeByDay(f = {}) {

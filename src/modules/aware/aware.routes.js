@@ -59,6 +59,7 @@ router.get(
 
 const analytics = {
   overview: service.getOverview,
+  'period-comparison': service.getPeriodComparison,
   'volume-by-day': service.getVolumeByDay,
   'volume-by-hour': service.getVolumeByHour,
   heatmap: service.getHeatmap,
