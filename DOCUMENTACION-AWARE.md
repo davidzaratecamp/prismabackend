@@ -149,6 +149,13 @@ Todos exigen JWT de rol `analista` (los admin no acceden por ahora). Query param
 - **Credenciales**: son las mismas `VOICEBOT_DB_*` del `.env` de VoxPro
   (`tecnologia@200.91.204.51:~/voxpro/backend/.env`). Copiar a `AWARE_DB_*` en el
   `.env` de Prisma y `pm2 restart prisma-api --update-env`.
+- ⚠️ **La contraseña de `analista` en Aware ROTA cada cierto tiempo** (histórico:
+  `!aware_2024!`, `!aware_2025!`, `!aware_2026!` … y volvió a `!aware_2025!` en
+  2026-09). Cuando el panel muestre *"password authentication failed for user
+  analista"*, hay que pedir la nueva al equipo de Aware y actualizarla en **los
+  dos** `.env`: `/var/www/prisma/backend/.env` (`AWARE_DB_PASSWORD`) **y**
+  `~/voxpro/backend/.env` (`VOICEBOT_DB_PASSWORD`), reiniciando ambos pm2. Si no,
+  también se cae la auditoría automática de VoxPro.
 - **Sin cron ni sync** — todo es consulta directa con caché de 60 s. Si las
   agregaciones sobre la vista `v_voicebot_result` se vuelven lentas con el tiempo,
   plan B: modo híbrido (sync nocturno del histórico + directo sólo el día).
