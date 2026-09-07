@@ -94,6 +94,7 @@ Todos exigen JWT de rol `analista` (los admin no acceden por ahora). Query param
 | `GET /deliverable` | entregable por llamada (14 campos Claro), paginado — ver §9 |
 | `GET /deliverable/:id` | una llamada con transcripción SOFIA↔cliente completa + audios |
 | `GET /deliverable.csv` / `.json` | exportación del rango (hasta 20 000 filas), honra filtros |
+| `GET /deliverable/:id/audio?leg=ia\|asesor` | grabación del tramo transcodificada a MP3 (requiere `ffmpeg` en el server) |
 
 ## 3. Frontend
 
@@ -205,7 +206,7 @@ DID viene de `retell_calls` (MySQL local).
 | 11 | Venta | `Sí` sólo si la tipificación del asesor es `UP`; si no, `No` |
 | 12 | Tipificación (en continuidad) | **IA (SOFIA):** disposición real de la llamada — `TRANSFERIDA A ASESOR` / `CLIENTE COLGÓ` / `RESUELTA POR LA IA` / `FINALIZADA POR LA IA` / `CERRADA POR INACTIVIDAD` (derivada de `hangup_reason` + `call_successful`; SOFIA no clasifica de verdad, siempre deja `UP`). **Asesor:** `registro_llamada.nomenclatura_id` + `tipo_contacto`, remapeado por `CLARO_TIP_TREE`. Extra: `tipo_servicio` (texto libre que detectó SOFIA). |
 | 13 | Transcripción | SOFIA ↔ cliente: `v_voicebot_result.transcript_object` (**sólo la IA**, no el tramo humano) |
-| 14 | Grabación | IA: `{AUDIO_BASE_URL}/{v_voicebot_result.audiofile}` · asesor: `{AUDIO_BASE_URL}/{registro_llamada.audiofile}.WAV` |
+| 14 | Grabación | URL cruda en Aware — IA: `{AUDIO_BASE_URL}/{v_voicebot_result.audiofile}` · asesor: `{AUDIO_BASE_URL}/{registro_llamada.audiofile}.WAV`. Para reproducir en el navegador (la del asesor es WAV/GSM 6.10, no decodable): `GET /api/aware/deliverable/:id/audio?leg=ia|asesor` la transcodifica a MP3 al vuelo con `ffmpeg` (`aware.audio.js`) |
 
 Filtros del endpoint: `estado` (`transferido`/`abandonado`/`ia`), `venta` (`si`/`no`),
 `tipificacion` (código de Aware), además de `from`/`to`/`proyecto`. Lista paginada con

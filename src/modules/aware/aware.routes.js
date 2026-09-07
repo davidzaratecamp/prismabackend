@@ -6,6 +6,7 @@ import { env } from '../../config/env.js';
 import { isAwareConfigured } from './aware.db.js';
 import * as service from './aware.service.js';
 import * as deliverable from './aware.deliverable.js';
+import { streamAudioAsMp3 } from './aware.audio.js';
 
 const router = Router();
 
@@ -188,6 +189,18 @@ router.get(
     const row = await deliverable.getDeliverableCall(req.params.id);
     if (!row) throw new HttpError(404, 'Llamada no encontrada');
     res.json(row);
+  })
+);
+
+// Grabación de un tramo (ia | asesor) transcodificada a MP3 reproducible.
+router.get(
+  '/deliverable/:id/audio',
+  ensureConfigured,
+  asyncHandler(async (req, res) => {
+    const leg = req.query.leg === 'asesor' ? 'asesor' : 'ia';
+    const src = await deliverable.audioSource(req.params.id, leg);
+    if (!src) throw new HttpError(404, 'Grabación no disponible');
+    streamAudioAsMp3(src, res);
   })
 );
 

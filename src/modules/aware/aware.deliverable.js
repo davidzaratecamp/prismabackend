@@ -249,6 +249,13 @@ export async function getDeliverableCall(callId) {
   };
 }
 
+/** URL cruda (en el servidor de Aware) de la grabación de un tramo de la llamada. */
+export async function audioSource(callId, leg) {
+  const row = await getDeliverableCall(callId);
+  if (!row) return null;
+  return leg === 'asesor' ? row.grabacion_asesor_url : row.grabacion_ia_url;
+}
+
 /* ───────────────────────── exportación (CSV / JSON) ───────────────────────── */
 
 const MAX_EXPORT = 20000;
