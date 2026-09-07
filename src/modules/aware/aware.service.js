@@ -382,7 +382,9 @@ export function getDurationBuckets(f = {}) {
 /* ───────────────────────── por proyecto ───────────────────────── */
 
 export function getByProject(f = {}) {
-  const r = { ...resolveFilters(f), proyectoIds: BOT_PROY_IDS }; // siempre ambos
+  const base = resolveFilters(f);
+  // Normalmente ambas campañas; si el filtro (o el alcance del analista) fija una, respetarla.
+  const r = { ...base, proyectoIds: f.proyecto != null ? base.proyectoIds : BOT_PROY_IDS };
   return cached(key('by-project', r), 60000, async () => {
     const rows = await awareQuery(
       `SELECT proyecto_id,
@@ -911,7 +913,7 @@ export function getServiceGroups(f = {}) {
 export function getAgentHangup(f = {}) {
   const r = resolveFilters(f);
   return cached(key('agent-hangup', r), 120000, async () => {
-    const forced = { ...r, proyectoIds: BOT_PROY_IDS };
+    const forced = { ...r, proyectoIds: f.proyecto != null ? r.proyectoIds : BOT_PROY_IDS };
     const [byProject, byHour, overall, sample] = await Promise.all([
       awareQuery(
         `SELECT proyecto_id, COUNT(*)::int AS total,
@@ -1260,16 +1262,20 @@ export async function getLiveCalls(f = {}) {
   });
 }
 
-export async function getFilterOptions() {
+export async function getFilterOptions(f = {}) {
+  const ids =
+    f.proyecto != null && BOT_PROY_IDS.includes(Number(f.proyecto))
+      ? [Number(f.proyecto)]
+      : BOT_PROY_IDS;
   const [x] = await awareQuery(
     `SELECT MIN(fecha)::text AS min_date, MAX(fecha)::text AS max_date
      FROM v_voicebot_result WHERE proyecto_id = ANY($1::int[])`,
-    [BOT_PROY_IDS]
+    [ids]
   );
   return {
     min_date: x?.min_date || null,
     max_date: x?.max_date || null,
-    projects: BOT_PROY_IDS.map((id) => ({ proyecto_id: id, name: PROY.bot[id] })),
+    projects: ids.map((id) => ({ proyecto_id: id, name: PROY.bot[id] })),
   };
 }
 
@@ -1298,10 +1304,10 @@ export async function getVoxproQuality() {
   return { available: !!payload, age_minutes: ageMin, ...payload };
 }
 
-export async function getConfig() {
+export async function getConfig(f = {}) {
   if (!isAwareConfigured()) return { configured: false };
   try {
-    const opts = await getFilterOptions();
+    const opts = await getFilterOptions(f);
     return { configured: true, ...opts };
   } catch (err) {
     return { configured: true, error: String(err.message || err) };

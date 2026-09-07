@@ -29,6 +29,7 @@ const publicUser = (u) => ({
   email: u.email,
   role: u.role,
   area_id: u.area_id,
+  aware_scope: u.aware_scope ?? null,
   avatar_color: u.avatar_color,
 });
 

@@ -39,10 +39,14 @@ function ensureConfigured(_req, _res, next) {
 
 function parseFilters(req) {
   const q = req.query || {};
+  // Un analista con alcance de campaña (aware_scope 12/13) queda forzado a esa
+  // campaña sin importar lo que pida el query string.
+  const scope = req.user?.aware_scope;
+  const scoped = scope === 12 || scope === 13;
   return {
     from: q.from,
     to: q.to,
-    proyecto: q.proyecto,
+    proyecto: scoped ? String(scope) : q.proyecto,
     hangup: q.hangup,
     phone: q.phone,
     sentiment: q.sentiment,
@@ -60,8 +64,8 @@ function parseFilters(req) {
 // /config responde aunque no esté configurado (para que el front muestre el aviso).
 router.get(
   '/config',
-  asyncHandler(async (_req, res) => {
-    res.json(await service.getConfig());
+  asyncHandler(async (req, res) => {
+    res.json(await service.getConfig(parseFilters(req)));
   })
 );
 
@@ -119,8 +123,8 @@ for (const [path, fn] of Object.entries(analytics)) {
 router.get(
   '/analytics/filters',
   ensureConfigured,
-  asyncHandler(async (_req, res) => {
-    res.json(await service.getFilterOptions());
+  asyncHandler(async (req, res) => {
+    res.json(await service.getFilterOptions(parseFilters(req)));
   })
 );
 

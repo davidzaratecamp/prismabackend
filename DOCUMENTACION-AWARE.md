@@ -6,8 +6,14 @@ voicebot **SOFIA** sobre **Aware**. Interfaz única y **exclusiva del rol
 
 - **Rol `analista`** → al iniciar sesión cae directo en este panel (`AnalystShell`),
   sin acceso a la app de Desarrollo ni al Portal.
+- **Alcance por campaña** (`users.aware_scope`, migración `20260908090000`):
+  `NULL` = ve ambas campañas; `12` = solo Claro Hogar; `13` = solo Claro TyT.
+  Se fuerza en `parseFilters` (`aware.routes.js`) sobre **todos** los endpoints y
+  el front bloquea el selector de campaña. Se configura en Equipo → usuario.
 - **Datos en vivo**: se consulta directo la BD PostgreSQL de Aware (solo lectura)
   con un caché de 60 s; el front refresca cada 60 s. No hay sincronización.
+- **Filtro de fecha**: rangos relativos (hoy / 7 / 30 / 90 d), mes concreto y
+  **un día específico** (selector de fecha, `rangeKey = day:YYYY-MM-DD`).
 
 Fuente de datos y semántica: ver `aware-claro-inbound-documentacion.md` en la raíz
 del repo (inspección de las BD de producción).
