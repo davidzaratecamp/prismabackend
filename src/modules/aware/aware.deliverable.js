@@ -21,7 +21,7 @@ import {
 import { cached } from './aware.cache.js';
 import { db } from '../../db/knex.js'; // MySQL — sólo para el DID (retell_calls)
 import { resolveFilters, baseParams, num } from './aware.service.js';
-import { mapTip } from './aware.tipmap.js';
+import { mapTip, normTipIA, TIP_IA_VALUES } from './aware.tipmap.js';
 
 /* LATERAL: continuación humana de la transferencia + su tipificación. Extiende el
    HUMAN_MATCH de aware.service.js con nombre de asesor, duraciones y audiofile. */
@@ -47,9 +47,10 @@ const DELIV_LATERAL = `
 
 const ESTADOS = ['transferido', 'abandonado', 'ia'];
 const VENTAS = ['si', 'no'];
+const TIP_IA_CODE = "v.call_analysis->'custom_analysis_data'->>'CODIGO_TIPIFICACIONIA'";
 
 /** Traduce los filtros opcionales del entregable a condiciones SQL. */
-function extraConds({ estado, venta, tip }, params) {
+function extraConds({ estado, venta, tip, tipIa }, params) {
   const extra = [];
   if (estado === 'transferido') {
     extra.push(`v.hangup_reason = 'call_transfer' AND h.rid IS NOT NULL AND h.nom IS DISTINCT FROM 'ABN'`);
@@ -64,12 +65,19 @@ function extraConds({ estado, venta, tip }, params) {
     params.push(tip);
     extra.push(`h.nom = $${params.length}`);
   }
+  if (tipIa === '__none__') {
+    extra.push(`NULLIF(TRIM(${TIP_IA_CODE}), '') IS NULL`);
+  } else if (tipIa) {
+    // SOFIA suele escribir el valor oficial tal cual; match exacto (case-insensitive)
+    params.push(tipIa);
+    extra.push(`lower(TRIM(${TIP_IA_CODE})) = lower($${params.length})`);
+  }
   return extra;
 }
 
-async function runQuery(r, { estado, venta, tip, limit, offset, withTranscript }) {
+async function runQuery(r, { estado, venta, tip, tipIa, limit, offset, withTranscript }) {
   const params = baseParams(r); // [proyectoIds, from, to]
-  const extra = extraConds({ estado, venta, tip }, params);
+  const extra = extraConds({ estado, venta, tip, tipIa }, params);
   const where = [
     'v.proyecto_id = ANY($1::int[])',
     'v.fecha BETWEEN $2 AND $3',
@@ -86,6 +94,7 @@ async function runQuery(r, { estado, venta, tip, limit, offset, withTranscript }
             v.hangup_reason, v.duracion AS dur_ia, v.audiofile AS ia_audiofile,
             v.call_analysis->>'call_successful' AS ia_ok,
             v.call_analysis->'custom_analysis_data'->>'TIPO_SERVICIO' AS tipo_servicio,
+            v.call_analysis->'custom_analysis_data'->>'CODIGO_TIPIFICACIONIA' AS tip_ia_raw,
             COALESCE(jsonb_array_length(v.transcript_object), 0)::int AS ia_turnos,
             ${withTranscript ? 'v.transcript_object,' : ''}
             h.rid, h.asesor, h.time_tmo, h.time_speaking, h.rl_audiofile, h.nom, h.rl_uniqueid,
@@ -123,10 +132,10 @@ function estadoOf(x) {
 }
 
 /**
- * Campo 12a — "tipificación de SOFIA". SOFIA no clasifica de verdad (deja siempre
- * UP), así que se usa su disposición real: cómo terminó su gestión.
+ * "Gestión IA" — disposición real de SOFIA (cómo terminó su parte). Cobertura
+ * 100 %; sirve de respaldo cuando CODIGO_TIPIFICACIONIA viene vacío.
  */
-function tipIA(hangup, ok) {
+function gestionIA(hangup, ok) {
   switch (hangup) {
     case 'call_transfer':
       return 'TRANSFERIDA A ASESOR';
@@ -170,8 +179,13 @@ function mapRow(x, retellMap) {
     estado,
     venta: x.nom === 'UP' ? 'Sí' : 'No',
     tipo_servicio: x.tipo_servicio || null,
-    // campo 12: tipificación en continuidad — primero la de SOFIA, luego la del asesor
-    tipificacion_ia: tipIA(x.hangup_reason, x.ia_ok),
+    // campo 12 en continuidad: SOFIA (gestión + tipificación IA) → asesor
+    gestion_ia: gestionIA(x.hangup_reason, x.ia_ok),
+    tipificacion_ia: (() => {
+      const raw = x.tip_ia_raw && String(x.tip_ia_raw).trim() ? String(x.tip_ia_raw).trim() : null;
+      return normTipIA(raw) || (raw ? 'SIN ESTANDARIZAR' : null);
+    })(),
+    tipificacion_ia_raw: x.tip_ia_raw && String(x.tip_ia_raw).trim() ? String(x.tip_ia_raw).trim() : null,
     tipificacion_asesor_codigo: tip?.codigo ?? null,
     tipificacion_asesor_nombre: tip?.nombre ?? (x.tc_nombre || null),
     tipificacion_asesor_grupo: tip?.grupo ?? (x.tc_efectivo || null),
@@ -184,10 +198,15 @@ function mapRow(x, retellMap) {
 }
 
 function normFilters(f = {}) {
+  const tipIaIn = f.tipificacionIa ? String(f.tipificacionIa) : null;
   return {
     estado: ESTADOS.includes(f.estado) ? f.estado : null,
     venta: VENTAS.includes(f.venta) ? f.venta : null,
     tip: f.tipificacion ? String(f.tipificacion).toUpperCase().replace(/[^A-Z]/g, '').slice(0, 6) : null,
+    tipIa:
+      tipIaIn === '__none__'
+        ? '__none__'
+        : TIP_IA_VALUES.includes(tipIaIn) ? tipIaIn : null,
   };
 }
 
@@ -198,7 +217,7 @@ export function buildDeliverable(f = {}) {
   const page = Math.max(1, Number(f.page) || 1);
   const pageSize = Math.min(500, Math.max(1, Number(f.pageSize) || 100));
   const nf = normFilters(f);
-  const ck = `deliverable:${r.proyectoIds.join(',')}:${r.from}:${r.to}:${nf.estado || ''}:${nf.venta || ''}:${nf.tip || ''}:${page}:${pageSize}`;
+  const ck = `deliverable:${r.proyectoIds.join(',')}:${r.from}:${r.to}:${nf.estado || ''}:${nf.venta || ''}:${nf.tip || ''}:${nf.tipIa || ''}:${page}:${pageSize}`;
 
   return cached(ck, 120000, async () => {
     const { rows, total } = await runQuery(r, {
@@ -228,6 +247,7 @@ export async function getDeliverableCall(callId) {
             v.hangup_reason, v.duracion AS dur_ia, v.audiofile AS ia_audiofile,
             v.call_analysis->>'call_successful' AS ia_ok,
             v.call_analysis->'custom_analysis_data'->>'TIPO_SERVICIO' AS tipo_servicio,
+            v.call_analysis->'custom_analysis_data'->>'CODIGO_TIPIFICACIONIA' AS tip_ia_raw,
             COALESCE(jsonb_array_length(v.transcript_object), 0)::int AS ia_turnos,
             v.transcript_object, v.call_analysis, v.telefono,
             h.rid, h.asesor, h.time_tmo, h.time_speaking, h.rl_audiofile, h.nom, h.rl_uniqueid,
@@ -273,7 +293,9 @@ const CSV_COLS = [
   ['segmento', (x) => x.segmento],
   ['estado', (x) => x.estado],
   ['venta', (x) => x.venta],
+  ['gestion_ia', (x) => x.gestion_ia],
   ['tipificacion_ia', (x) => x.tipificacion_ia],
+  ['tipificacion_ia_raw', (x) => x.tipificacion_ia_raw],
   ['tipificacion_asesor_codigo', (x) => x.tipificacion_asesor_codigo],
   ['tipificacion_asesor_nombre', (x) => x.tipificacion_asesor_nombre],
   ['tipificacion_asesor_grupo', (x) => x.tipificacion_asesor_grupo],

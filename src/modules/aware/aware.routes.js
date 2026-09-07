@@ -50,6 +50,7 @@ function parseFilters(req) {
     estado: q.estado,
     venta: q.venta,
     tipificacion: q.tipificacion,
+    tipificacionIa: q.tipificacionIa,
     page: q.page,
     pageSize: q.pageSize,
   };

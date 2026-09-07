@@ -32,3 +32,36 @@ export function mapTip(nomId) {
   if (!nomId) return null;
   return CLARO_TIP_TREE[nomId] || { codigo: nomId, nombre: nomId, grupo: null };
 }
+
+/* ─────────── Tipificación IA de SOFIA (campo 12a) ───────────
+ * SOFIA escribe `call_analysis.custom_analysis_data.CODIGO_TIPIFICACIONIA` con
+ * uno de estos 8 valores oficiales. En la práctica no siempre respeta la lista
+ * (texto libre, vacío, restos como 'call_transfer'/'UP'/ids), así que se
+ * normaliza: coincidencia exacta (sin tildes ni signos) → valor oficial; si no
+ * encaja pero hay texto → 'SIN ESTANDARIZAR'; vacío → null.
+ */
+export const TIP_IA_VALUES = [
+  'COMPRA - TRANSFERENCIA ASESOR',
+  'FACTURACIÓN',
+  'SOPORTE / FALLAS',
+  'CANCELACIÓN',
+  'RECLAMO',
+  'TRASLADO',
+  'SAC GENERAL',
+  'CLIENTE CUELGA IA',
+];
+
+const canon = (s) =>
+  String(s || '')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toUpperCase()
+    .replace(/[^A-Z]/g, '');
+
+const TIP_IA_BY_KEY = new Map(TIP_IA_VALUES.map((v) => [canon(v), v]));
+
+/** Devuelve uno de los 8 valores oficiales, o null si no encaja. */
+export function normTipIA(raw) {
+  if (!raw || !String(raw).trim()) return null;
+  return TIP_IA_BY_KEY.get(canon(raw)) || null;
+}
