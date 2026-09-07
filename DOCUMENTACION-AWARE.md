@@ -89,6 +89,7 @@ Todos exigen JWT de rol `analista` (los admin no acceden por ahora). Query param
 | `GET /analytics/agent-hangup` | foco en `agent_hangup`: por campaña, por hora, muestras de resumen |
 | `GET /analytics/filters` | rango de fechas + campañas |
 | `GET /live` | últimas 25 llamadas de **hoy** (caché 10 s) — pestaña "En vivo" |
+| `GET /live/:callId/monitor` | transcripción **en vivo** de una llamada en curso vía el WebSocket `monitor-call` de Retell (solo texto; el audio en vivo solo está en el panel de Retell). Una conexión compartida por llamada, `ws` package, GC de ociosas (`aware.monitor.js`) |
 | `GET /calls` | tabla paginada (`page`, `pageSize`, `hangup`, `phone`, `sentiment`, `callSuccessful`) |
 | `GET /calls/:id` | detalle: análisis, transcripción turno a turno, URL de audio |
 | `GET /deliverable` | entregable por llamada (14 campos Claro), paginado — ver §9 |

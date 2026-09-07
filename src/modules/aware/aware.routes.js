@@ -7,6 +7,7 @@ import { isAwareConfigured } from './aware.db.js';
 import * as service from './aware.service.js';
 import * as deliverable from './aware.deliverable.js';
 import { streamAudioAsMp3 } from './aware.audio.js';
+import { getMonitor } from './aware.monitor.js';
 
 const router = Router();
 
@@ -137,6 +138,15 @@ router.get(
   ensureConfigured,
   asyncHandler(async (req, res) => {
     res.json(await service.getLiveCalls(parseFilters(req)));
+  })
+);
+
+// Monitoreo en vivo (transcripción) de una llamada en curso vía el WebSocket de
+// Retell. No exige AWARE_DB_* (usa la API de Retell). Polling desde el front.
+router.get(
+  '/live/:callId/monitor',
+  asyncHandler(async (req, res) => {
+    res.json(getMonitor(req.params.callId));
   })
 );
 
