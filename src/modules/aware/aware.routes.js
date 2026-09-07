@@ -5,6 +5,7 @@ import { HttpError } from '../../utils/httpError.js';
 import { env } from '../../config/env.js';
 import { isAwareConfigured } from './aware.db.js';
 import * as service from './aware.service.js';
+import * as deliverable from './aware.deliverable.js';
 
 const router = Router();
 
@@ -44,6 +45,10 @@ function parseFilters(req) {
     phone: q.phone,
     sentiment: q.sentiment,
     callSuccessful: q.callSuccessful,
+    // filtros del entregable por llamada
+    estado: q.estado,
+    venta: q.venta,
+    tipificacion: q.tipificacion,
     page: q.page,
     pageSize: q.pageSize,
   };
@@ -148,6 +153,41 @@ router.get(
     const call = await service.getCall(req.params.id);
     if (!call) throw new HttpError(404, 'Llamada no encontrada');
     res.json(call);
+  })
+);
+
+/* ── Entregable por llamada (14 campos Claro) ── */
+router.get(
+  '/deliverable.csv',
+  ensureConfigured,
+  asyncHandler(async (req, res) => {
+    await deliverable.streamDeliverable(parseFilters(req), 'csv', res);
+  })
+);
+
+router.get(
+  '/deliverable.json',
+  ensureConfigured,
+  asyncHandler(async (req, res) => {
+    await deliverable.streamDeliverable(parseFilters(req), 'json', res);
+  })
+);
+
+router.get(
+  '/deliverable',
+  ensureConfigured,
+  asyncHandler(async (req, res) => {
+    res.json(await deliverable.buildDeliverable(parseFilters(req)));
+  })
+);
+
+router.get(
+  '/deliverable/:id',
+  ensureConfigured,
+  asyncHandler(async (req, res) => {
+    const row = await deliverable.getDeliverableCall(req.params.id);
+    if (!row) throw new HttpError(404, 'Llamada no encontrada');
+    res.json(row);
   })
 );
 

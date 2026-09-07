@@ -7,19 +7,19 @@ import { db } from '../../db/knex.js'; // MySQL (prisma_db) — sólo para el sn
 const YMD = /^\d{4}-\d{2}-\d{2}$/;
 
 /** Fecha de hoy en hora de Bogotá (UTC−5), 'YYYY-MM-DD'. */
-function todayBogota() {
+export function todayBogota() {
   return new Date(Date.now() - 5 * 3600000).toISOString().slice(0, 10);
 }
-function addDays(ymd, n) {
+export function addDays(ymd, n) {
   const d = new Date(`${ymd}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + n);
   return d.toISOString().slice(0, 10);
 }
-function num(v) {
+export function num(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : 0;
 }
-function rate(n, d) {
+export function rate(n, d) {
   return d ? Math.round((num(n) / num(d)) * 10000) / 10000 : null;
 }
 
@@ -27,7 +27,7 @@ function rate(n, d) {
  * Normaliza los filtros de entrada.
  * @param {object} f  { from, to ('YYYY-MM-DD'), proyecto (12|13|undefined) }
  */
-function resolveFilters(f = {}) {
+export function resolveFilters(f = {}) {
   const proyectoIds =
     f.proyecto != null && BOT_PROY_IDS.includes(Number(f.proyecto))
       ? [Number(f.proyecto)]
@@ -41,8 +41,8 @@ const key = (name, r, extra = '') =>
   `${name}:${r.proyectoIds.join(',')}:${r.from}:${r.to}${extra ? ':' + extra : ''}`;
 
 // condición y params base compartidos por casi todo
-const BASE_WHERE = 'proyecto_id = ANY($1::int[]) AND fecha BETWEEN $2 AND $3';
-const baseParams = (r) => [r.proyectoIds, r.from, r.to];
+export const BASE_WHERE = 'proyecto_id = ANY($1::int[]) AND fecha BETWEEN $2 AND $3';
+export const baseParams = (r) => [r.proyectoIds, r.from, r.to];
 
 /* ───────────────────────── KPIs ───────────────────────── */
 

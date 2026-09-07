@@ -100,3 +100,18 @@ export const PROY = {
 };
 export const BOT_PROY_IDS = [12, 13];
 export const AUDIO_BASE_URL = env.aware.audioBaseUrl;
+
+/**
+ * DID entrante que atiende SOFIA → segmento. El DID sale de Retell
+ * (`retell_calls.to_number`, cobertura ~100%); el segmento equivale al proyecto
+ * del bot (12 Hogar / 13 TyT). Ajustar si Claro entrega la lista real de DIDs.
+ */
+export const DID_SEGMENT = {
+  573012: { proyecto_id: 12, segmento: 'Claro Hogar' },
+  573013: { proyecto_id: 13, segmento: 'Claro TyT' },
+};
+/** Inverso: proyecto del bot → DID canónico + segmento (fallback si Retell no tiene la llamada). */
+export const SEGMENT_BY_PROY = {
+  12: { did: '573012', segmento: 'Claro Hogar' },
+  13: { did: '573013', segmento: 'Claro TyT' },
+};

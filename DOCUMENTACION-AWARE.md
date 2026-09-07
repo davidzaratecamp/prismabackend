@@ -91,6 +91,9 @@ Todos exigen JWT de rol `analista` (los admin no acceden por ahora). Query param
 | `GET /live` | últimas 25 llamadas de **hoy** (caché 10 s) — pestaña "En vivo" |
 | `GET /calls` | tabla paginada (`page`, `pageSize`, `hangup`, `phone`, `sentiment`, `callSuccessful`) |
 | `GET /calls/:id` | detalle: análisis, transcripción turno a turno, URL de audio |
+| `GET /deliverable` | entregable por llamada (14 campos Claro), paginado — ver §9 |
+| `GET /deliverable/:id` | una llamada con transcripción SOFIA↔cliente completa + audios |
+| `GET /deliverable.csv` / `.json` | exportación del rango (hasta 20 000 filas), honra filtros |
 
 ## 3. Frontend
 
@@ -181,10 +184,42 @@ VoxPro (job cada 20 min)  ──POST snapshot──▶  Prisma  ──▶  tabla
   nombre real.
 - Si el job de VoxPro se cae, el panel muestra "desactualizado hace X min".
 
-## 8. Pendientes
+## 8. Entregable por llamada (14 campos Claro)
+
+`backend/src/modules/aware/aware.deliverable.js` + pestaña **"Entregable"** del panel.
+Una fila por llamada del bot; el tramo del asesor se empareja con el mismo heurístico
+`teléfono + fecha + hora` del §4 (aproximado, sin FK). Todo sale en vivo de Aware; el
+DID viene de `retell_calls` (MySQL local).
+
+| # | Campo | Fuente |
+|---|---|---|
+| 1 | ID único | `v_voicebot_result.call_id` (correlaciona ambos tramos) |
+| 2 · 3 | Fecha · Hora | `v_voicebot_result.fecha` / `hora` (hora Colombia) |
+| 4 | Asesor | `registro_llamada.json_data->>'agente'` de la continuación humana |
+| 5 | Duración IA (s) | `v_voicebot_result.duracion` |
+| 6 | Duración asesor (s) | `registro_llamada.time_tmo` (handle time; también se lee `time_speaking`) |
+| 7 | Duración total (s) | 5 + 6 |
+| 8 | DID | `retell_calls.to_number` (join por `call_id`); fallback `SEGMENT_BY_PROY` |
+| 9 | Segmento | mapa `DID_SEGMENT`: `573012`→Claro Hogar, `573013`→Claro TyT (`aware.db.js`) |
+| 10 | Estado | `Transferido` = `call_transfer` + continuación humana atendida; `Abandonado` = `call_transfer` sin asesor (o `ABN`); `Gestión IA` = el bot resolvió sin transferir |
+| 11 | Venta | `Sí` sólo si la tipificación del asesor es `UP`; si no, `No` |
+| 12 | Tipificación (en continuidad) | **IA (SOFIA):** disposición real de la llamada — `TRANSFERIDA A ASESOR` / `CLIENTE COLGÓ` / `RESUELTA POR LA IA` / `FINALIZADA POR LA IA` / `CERRADA POR INACTIVIDAD` (derivada de `hangup_reason` + `call_successful`; SOFIA no clasifica de verdad, siempre deja `UP`). **Asesor:** `registro_llamada.nomenclatura_id` + `tipo_contacto`, remapeado por `CLARO_TIP_TREE`. Extra: `tipo_servicio` (texto libre que detectó SOFIA). |
+| 13 | Transcripción | SOFIA ↔ cliente: `v_voicebot_result.transcript_object` (**sólo la IA**, no el tramo humano) |
+| 14 | Grabación | IA: `{AUDIO_BASE_URL}/{v_voicebot_result.audiofile}` · asesor: `{AUDIO_BASE_URL}/{registro_llamada.audiofile}.WAV` |
+
+Filtros del endpoint: `estado` (`transferido`/`abandonado`/`ia`), `venta` (`si`/`no`),
+`tipificacion` (código de Aware), además de `from`/`to`/`proyecto`. Lista paginada con
+caché de 120 s; la exportación no se cachea y va en bloques de 1 000 filas (tope 20 000).
+
+**Pendiente de Claro:** confirmar si los DID reales son `573012` / `573013` o números
+más largos. El árbol de tipificación del asesor es el de `tipo_contacto` (16 códigos);
+`CLARO_TIP_TREE` (`aware.tipmap.js`) es el único punto a editar si Claro entrega otro.
+
+## 9. Pendientes
 
 - Mapear las colas de `v_abandono` (3006–3019) a `proyecto_id` para separar el
   abandono en cola por campaña (hoy es global). Falta el mapeo en la BD de Aware.
 - Normalizar `TIPO_SERVICIO` (hoy texto libre; en el panel ya se agrupa por regex).
 - El usuario `analista` no puede leer `usuario` ni `cdr_custom` en Aware — por eso
   los nombres de asesor vienen de VoxPro y `cdr_custom` no se usa (sí `v_abandono`).
+- Entregable Claro: falta el documento del árbol de tipificación y confirmar los DID.
