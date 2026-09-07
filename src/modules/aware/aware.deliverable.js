@@ -325,7 +325,7 @@ export async function streamDeliverable(f, format, res) {
   const isCsv = format === 'csv';
 
   res.setHeader('Content-Type', isCsv ? 'text/csv; charset=utf-8' : 'application/json; charset=utf-8');
-  res.setHeader('Content-Disposition', `attachment; filename="entregable_${r.from}_${r.to}.${isCsv ? 'csv' : 'json'}"`);
+  res.setHeader('Content-Disposition', `attachment; filename="consolidado_llamadas_${r.from}_${r.to}.${isCsv ? 'csv' : 'json'}"`);
 
   if (isCsv) {
     res.write('﻿'); // BOM UTF-8 para que Excel abra bien los acentos
