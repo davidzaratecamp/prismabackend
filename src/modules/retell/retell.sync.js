@@ -260,13 +260,15 @@ export async function syncCalls(p = {}) {
     else if (prevSynced > 0) stopAt = Math.max(0, prevSynced - overlapMs);
     else stopAt = floorTs;
 
-    const filterCriteria = { after_start_timestamp: stopAt };
-
+    // v3 /list-calls cambió el DSL de filtros y quitó `after_start_timestamp`.
+    // En vez de perseguir el nuevo formato de rango, se pide en orden
+    // descendente (más nuevas primero) SIN filtro de fecha y se corta abajo en
+    // cuanto se llega a lo ya sincronizado / al piso de lookback.
     let processed = 0;
     let maxTs = prevSynced;
     let batch = [];
 
-    for await (const call of c.iterateCalls({ filterCriteria, sortOrder: 'descending', pageSize })) {
+    for await (const call of c.iterateCalls({ sortOrder: 'descending', pageSize })) {
       const ts = Number(call.start_timestamp || 0);
       if (ts && (ts <= stopAt || ts < floorTs)) break;
 

@@ -7,18 +7,20 @@ import { env } from '../../config/env.js';
  * Autenticación: header  Authorization: Bearer <API_KEY>
  * Base URL:      https://api.retellai.com
  *
- * NOTA DE VERSIONES: la doc de Retell mezcla rutas versionadas y sin versión
- * (list-calls también existe como /v3). Si algo devuelve 404, ajustar ENDPOINTS.
+ * NOTA DE VERSIONES: Retell deprecó los "legacy list endpoints" (aviso
+ * 2026-06-15). Usar las rutas versionadas: `POST /v3/list-calls` (respuesta
+ * paginada `{ items, pagination_key, has_more }`) y `GET /v2/list-phone-numbers`.
+ * `list-agents` no está en la lista de deprecados.
  */
 
 const ENDPOINTS = {
   listAgents: '/list-agents',
   getAgent: (id) => `/get-agent/${encodeURIComponent(id)}`,
-  listPhoneNumbers: '/list-phone-numbers',
+  listPhoneNumbers: '/v2/list-phone-numbers',
   getPhoneNumber: (n) => `/get-phone-number/${encodeURIComponent(n)}`,
   getConcurrency: '/get-concurrency',
   listKnowledgeBases: '/list-knowledge-bases',
-  listCalls: '/v2/list-calls',
+  listCalls: '/v3/list-calls',
   getCall: (id) => `/v2/get-call/${encodeURIComponent(id)}`,
 };
 
@@ -152,11 +154,11 @@ export class RetellClient {
   }
 
   /**
-   * POST /v2/list-calls
+   * POST /v3/list-calls — respuesta paginada `{ items, pagination_key, has_more }`.
    * @param {object} p
-   * @param {object} [p.filterCriteria]
-   * @param {'ascending'|'descending'} [p.sortOrder='descending']
-   * @param {number} [p.limit=500]
+   * @param {object} [p.filterCriteria]  filtros v3 (p. ej. { call_status: [...] })
+   * @param {'ascending'|'descending'} [p.sortOrder='descending']  ordena por start_timestamp
+   * @param {number} [p.limit=500]  máx. 1000 en v3
    * @param {string} [p.paginationKey]
    */
   listCalls({ filterCriteria, sortOrder = 'descending', limit = 500, paginationKey } = {}) {
