@@ -207,8 +207,10 @@ DID viene de `retell_calls` (MySQL local).
 | 5 | Duración IA (s) | `v_voicebot_result.duracion` |
 | 6 | Duración asesor (s) | `registro_llamada.time_tmo` (handle time; también se lee `time_speaking`) |
 | 7 | Duración total (s) | 5 + 6 |
-| 8 | DID | `retell_calls.to_number` (join por `call_id`); fallback `SEGMENT_BY_PROY` |
-| 9 | Segmento | mapa `DID_SEGMENT`: `573012`→Claro Hogar, `573013`→Claro TyT (`aware.db.js`) |
+| — | `telefono` | `v_voicebot_result.telefono` — número del cliente en esa llamada |
+| — | `numero_ivr` | Número de origen que presenta Claro (IVR). `retell_calls.from_number` si la llamada está sincronizada; si no, `CLARO_IVR_NUMBER` = `3143000756` (99 % de los casos) |
+| 8 | DID | **DID real** (número marcado). Exacto por la cola humana si hubo transferencia (`DID_BY_QUEUE`: 7→6019196235, 9→6019142515, 10→6019184507, 11→6019193216); si no, la línea principal de la campaña (`DID_PRIMARY_BY_PROY`) + `did_exacto=false`. Se acompaña de `did_cola` (nombre de la cola). `aware.db.js` |
+| 9 | Segmento | `SEGMENT_BY_PROY` por `proyecto_id` del bot: 12→Claro Hogar, 13→Claro TyT |
 | 10 | Estado | `Transferido` = `call_transfer` + continuación humana atendida; `Abandonado` = `call_transfer` sin asesor (o `ABN`); `Gestión IA` = el bot resolvió sin transferir |
 | 11 | Venta | `Sí` sólo si la tipificación del asesor es `UP`; si no, `No` |
 | 12 | Tipificación (en continuidad) | **`gestion_ia`** (disposición de SOFIA, cobertura 100 %): `TRANSFERIDA A ASESOR` / `CLIENTE COLGÓ` / `RESUELTA POR LA IA` / `FINALIZADA POR LA IA` / `CERRADA POR INACTIVIDAD` (de `hangup_reason` + `call_successful`). **`tipificacion_ia`**: `call_analysis.custom_analysis_data.CODIGO_TIPIFICACIONIA` normalizado a los 8 valores oficiales de SOFIA (`COMPRA - TRANSFERENCIA ASESOR`, `FACTURACIÓN`, `SOPORTE / FALLAS`, `CANCELACIÓN`, `RECLAMO`, `TRASLADO`, `SAC GENERAL`, `CLIENTE CUELGA IA`) — lo que no encaja → `SIN ESTANDARIZAR` (+ `tipificacion_ia_raw` con el literal); dato **nuevo (desde 2026-09-04) y de cobertura parcial**. **`tipificacion_asesor_*`**: `registro_llamada.nomenclatura_id` + `tipo_contacto`, remapeado por `CLARO_TIP_TREE`. Normalización y lista en `aware.tipmap.js` (`normTipIA`, `TIP_IA_VALUES`). Extra: `tipo_servicio`. Filtros: `tipificacionIa` (uno de los 8 o `__none__`). |
@@ -219,8 +221,13 @@ Filtros del endpoint: `estado` (`transferido`/`abandonado`/`ia`), `venta` (`si`/
 `tipificacion` (código de Aware), además de `from`/`to`/`proyecto`. Lista paginada con
 caché de 120 s; la exportación no se cachea y va en bloques de 1 000 filas (tope 20 000).
 
-**Pendiente de Claro:** confirmar si los DID reales son `573012` / `573013` o números
-más largos. El árbol de tipificación del asesor es el de `tipo_contacto` (16 códigos);
+**Nota:** el `573012` / `573013` que ve Retell/SIP en `to_number` es un número
+interno de enrutamiento, **no** el DID que marcó el tráfico. Los DID reales que
+entregó Claro son los cuatro `60191xxxxx` de `DID_BY_QUEUE`. Para llamadas que no
+llegaron a un asesor no se puede saber si entraron por la línea principal o la "2"
+(≈10 % Hogar, ≈4 % TyT); se marca `did_exacto=false`.
+
+**Árbol de tipificación del asesor:** es el de `tipo_contacto` (16 códigos);
 `CLARO_TIP_TREE` (`aware.tipmap.js`) es el único punto a editar si Claro entrega otro.
 
 ## 9. Pendientes

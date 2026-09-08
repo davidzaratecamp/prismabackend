@@ -101,17 +101,33 @@ export const PROY = {
 export const BOT_PROY_IDS = [12, 13];
 export const AUDIO_BASE_URL = env.aware.audioBaseUrl;
 
-/**
- * DID entrante que atiende SOFIA → segmento. El DID sale de Retell
- * (`retell_calls.to_number`, cobertura ~100%); el segmento equivale al proyecto
- * del bot (12 Hogar / 13 TyT). Ajustar si Claro entrega la lista real de DIDs.
- */
-export const DID_SEGMENT = {
-  573012: { proyecto_id: 12, segmento: 'Claro Hogar' },
-  573013: { proyecto_id: 13, segmento: 'Claro TyT' },
-};
-/** Inverso: proyecto del bot → DID canónico + segmento (fallback si Retell no tiene la llamada). */
+/** Segmento por proyecto del bot (12 Hogar / 13 TyT). */
 export const SEGMENT_BY_PROY = {
-  12: { did: '573012', segmento: 'Claro Hogar' },
-  13: { did: '573013', segmento: 'Claro TyT' },
+  12: { segmento: 'Claro Hogar' },
+  13: { segmento: 'Claro TyT' },
 };
+
+/**
+ * DID real (número marcado, lo entregó Claro) por **cola humana** de Aware.
+ * Cada campaña tiene una línea principal y una secundaria/overflow ("... 2").
+ *   7  Inb Hogar IA    → 6019196235
+ *   9  Inb Hogar IA 2  → 6019142515
+ *   10 Inb T&T IA      → 6019184507
+ *   11 Inb T&T IA 2    → 6019193216
+ */
+export const DID_BY_QUEUE = {
+  7: { did: '6019196235', cola: 'Inb Hogar IA', proyecto_id: 12 },
+  9: { did: '6019142515', cola: 'Inb Hogar IA 2', proyecto_id: 12 },
+  10: { did: '6019184507', cola: 'Inb T&T IA', proyecto_id: 13 },
+  11: { did: '6019193216', cola: 'Inb T&T IA 2', proyecto_id: 13 },
+};
+
+/** DID principal por campaña — se usa cuando la llamada no llegó a un asesor
+ *  (no hay cola humana que revele si entró por la línea 1 o la 2). */
+export const DID_PRIMARY_BY_PROY = {
+  12: { did: '6019196235', cola: 'Inb Hogar IA' },
+  13: { did: '6019184507', cola: 'Inb T&T IA' },
+};
+
+/** Número de origen que presenta la plataforma de Claro (IVR). Casi siempre este. */
+export const CLARO_IVR_NUMBER = '3143000756';

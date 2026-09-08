@@ -15,8 +15,10 @@ import {
   PROY,
   BOT_PROY_IDS,
   AUDIO_BASE_URL,
-  DID_SEGMENT,
+  DID_BY_QUEUE,
+  DID_PRIMARY_BY_PROY,
   SEGMENT_BY_PROY,
+  CLARO_IVR_NUMBER,
 } from './aware.db.js';
 import { cached } from './aware.cache.js';
 import { db } from '../../db/knex.js'; // MySQL — sólo para el DID (retell_calls)
@@ -28,6 +30,7 @@ import { mapTip, normTipIA, TIP_IA_VALUES } from './aware.tipmap.js';
 const DELIV_LATERAL = `
   LEFT JOIN LATERAL (
     SELECT r.registro_llamada_id AS rid,
+           r.proyecto_id AS h_proy,
            NULLIF(TRIM(r.json_data->>'agente'), '') AS asesor,
            r.time_tmo, r.time_speaking,
            r.audiofile AS rl_audiofile,
@@ -91,13 +94,13 @@ async function runQuery(r, { estado, venta, tip, tipIa, limit, offset, withTrans
 
   const rows = await awareQuery(
     `SELECT v.call_id, v.proyecto_id, v.fecha::text AS fecha, v.hora::text AS hora,
-            v.hangup_reason, v.duracion AS dur_ia, v.audiofile AS ia_audiofile,
+            v.hangup_reason, v.duracion AS dur_ia, v.audiofile AS ia_audiofile, v.telefono,
             v.call_analysis->>'call_successful' AS ia_ok,
             v.call_analysis->'custom_analysis_data'->>'TIPO_SERVICIO' AS tipo_servicio,
             v.call_analysis->'custom_analysis_data'->>'CODIGO_TIPIFICACIONIA' AS tip_ia_raw,
             COALESCE(jsonb_array_length(v.transcript_object), 0)::int AS ia_turnos,
             ${withTranscript ? 'v.transcript_object,' : ''}
-            h.rid, h.asesor, h.time_tmo, h.time_speaking, h.rl_audiofile, h.nom, h.rl_uniqueid,
+            h.rid, h.h_proy, h.asesor, h.time_tmo, h.time_speaking, h.rl_audiofile, h.nom, h.rl_uniqueid,
             tc.nomenclatura_nombre AS tc_nombre, tc.contacto_efectivo AS tc_efectivo,
             COUNT(*) OVER()::int AS total_rows
      FROM v_voicebot_result v
@@ -158,9 +161,11 @@ function mapRow(x, retellMap) {
   const durTotal = (durIa || 0) + (durAsesor || 0);
 
   const ret = retellMap.get(x.call_id);
-  const did = (ret && ret.to_number) || SEGMENT_BY_PROY[x.proyecto_id]?.did || null;
-  const segmento =
-    (did && DID_SEGMENT[did]?.segmento) || SEGMENT_BY_PROY[x.proyecto_id]?.segmento || null;
+  // DID real (número marcado): exacto por la cola humana si hubo transferencia;
+  // si no, el DID principal de la campaña (no se puede saber si entró por la línea 1 o la 2).
+  const didHit = x.h_proy != null ? DID_BY_QUEUE[x.h_proy] : null;
+  const didInfo = didHit || DID_PRIMARY_BY_PROY[x.proyecto_id] || null;
+  const segmento = SEGMENT_BY_PROY[x.proyecto_id]?.segmento || null;
 
   const tip = transferido ? mapTip(x.nom) : null;
 
@@ -170,11 +175,17 @@ function mapRow(x, retellMap) {
     proyecto_name: PROY.bot[x.proyecto_id] || String(x.proyecto_id),
     fecha: x.fecha,
     hora: x.hora ? String(x.hora).slice(0, 8) : null,
+    telefono: x.telefono || null,
+    // "El que llega de Claro (IVR)": el 99% es 3143000756; si la llamada está en
+    // retell_calls se usa el from_number real (captura el ~1% de excepciones).
+    numero_ivr: (ret && ret.from_number) || CLARO_IVR_NUMBER,
     asesor_nombre: transferido ? x.asesor || null : null,
     duracion_ia_seg: durIa,
     duracion_asesor_seg: durAsesor,
     duracion_total_seg: durTotal,
-    did,
+    did: didInfo?.did ?? null,
+    did_cola: didInfo?.cola ?? null,
+    did_exacto: !!didHit,
     segmento,
     estado,
     venta: x.nom === 'UP' ? 'Sí' : 'No',
@@ -250,7 +261,7 @@ export async function getDeliverableCall(callId) {
             v.call_analysis->'custom_analysis_data'->>'CODIGO_TIPIFICACIONIA' AS tip_ia_raw,
             COALESCE(jsonb_array_length(v.transcript_object), 0)::int AS ia_turnos,
             v.transcript_object, v.call_analysis, v.telefono,
-            h.rid, h.asesor, h.time_tmo, h.time_speaking, h.rl_audiofile, h.nom, h.rl_uniqueid,
+            h.rid, h.h_proy, h.asesor, h.time_tmo, h.time_speaking, h.rl_audiofile, h.nom, h.rl_uniqueid,
             tc.nomenclatura_nombre AS tc_nombre, tc.contacto_efectivo AS tc_efectivo
      FROM v_voicebot_result v
      ${DELIV_LATERAL}
@@ -285,12 +296,16 @@ const CSV_COLS = [
   ['id_llamada', (x) => x.call_id],
   ['fecha', (x) => x.fecha],
   ['hora', (x) => x.hora],
+  ['telefono_cliente', (x) => x.telefono],
+  ['numero_ivr_claro', (x) => x.numero_ivr],
+  ['did', (x) => x.did],
+  ['did_cola', (x) => x.did_cola],
+  ['did_exacto', (x) => (x.did_exacto ? 'si' : 'no')],
+  ['segmento', (x) => x.segmento],
   ['asesor', (x) => x.asesor_nombre],
   ['duracion_ia_seg', (x) => x.duracion_ia_seg],
   ['duracion_asesor_seg', (x) => x.duracion_asesor_seg],
   ['duracion_total_seg', (x) => x.duracion_total_seg],
-  ['did', (x) => x.did],
-  ['segmento', (x) => x.segmento],
   ['estado', (x) => x.estado],
   ['venta', (x) => x.venta],
   ['gestion_ia', (x) => x.gestion_ia],
