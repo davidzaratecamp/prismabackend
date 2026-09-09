@@ -11,7 +11,7 @@ import { logActivity } from '../../utils/activity.js';
 const router = Router();
 router.use(requireAuth);
 
-const USER_COLS = ['id', 'name', 'email', 'role', 'area_id', 'aware_scope', 'avatar_color', 'is_active', 'created_at'];
+const USER_COLS = ['id', 'name', 'email', 'role', 'area_id', 'aware_scope', 'aware_quality', 'avatar_color', 'is_active', 'created_at'];
 
 /** 12 = Claro Hogar · 13 = Claro TyT · null = ambas. Solo para rol `analista`. */
 const awareScopeSchema = z.union([z.literal(12), z.literal(13)]).nullable().optional();
@@ -47,6 +47,7 @@ const createSchema = z.object({
   role: z.enum(['admin', 'developer', 'viewer', 'analista']),
   area_id: z.number().int().positive().nullable().optional(),
   aware_scope: awareScopeSchema,
+  aware_quality: z.boolean().optional(),
 });
 
 router.post(
@@ -54,7 +55,7 @@ router.post(
   requireRole('admin'),
   validate(createSchema),
   asyncHandler(async (req, res) => {
-    const { name, email, password, role, area_id, aware_scope } = req.body;
+    const { name, email, password, role, area_id, aware_scope, aware_quality } = req.body;
     const exists = await db('users').where({ email }).first('id');
     if (exists) throw badRequest('Ya existe un usuario con ese correo');
     const password_hash = await bcrypt.hash(password, 10);
@@ -65,6 +66,7 @@ router.post(
       role,
       area_id: role === 'viewer' ? area_id ?? null : null,
       aware_scope: role === 'analista' ? aware_scope ?? null : null,
+      aware_quality: role === 'analista' ? !!aware_quality : false,
       avatar_color: randomColor(),
     });
     const user = await db('users').select(USER_COLS).where({ id }).first();
@@ -85,6 +87,7 @@ const updateSchema = z.object({
   role: z.enum(['admin', 'developer', 'viewer', 'analista']).optional(),
   area_id: z.number().int().positive().nullable().optional(),
   aware_scope: awareScopeSchema,
+  aware_quality: z.boolean().optional(),
   is_active: z.boolean().optional(),
   password: z.string().min(8).optional(),
 });
@@ -98,19 +101,24 @@ router.patch(
     if (!user) throw notFound('Usuario no encontrado');
 
     const patch = { updated_at: db.fn.now() };
-    const { name, email, role, area_id, aware_scope, is_active, password } = req.body;
+    const { name, email, role, area_id, aware_scope, aware_quality, is_active, password } = req.body;
     if (name !== undefined) patch.name = name;
     if (email !== undefined) patch.email = email;
     if (role !== undefined) patch.role = role;
     if (area_id !== undefined) patch.area_id = area_id;
     if (aware_scope !== undefined) patch.aware_scope = aware_scope;
+    if (aware_quality !== undefined) patch.aware_quality = aware_quality;
     if (is_active !== undefined) patch.is_active = is_active;
     if (password) patch.password_hash = await bcrypt.hash(password, 10);
 
-    // Normalizar: el área solo aplica a viewer; el alcance de campaña solo a analista.
+    // Normalizar: el área solo aplica a viewer; el alcance de campaña y el acceso
+    // a Calidad IA solo a analista.
     const finalRole = role ?? user.role;
     if (finalRole !== 'viewer') patch.area_id = null;
-    if (finalRole !== 'analista') patch.aware_scope = null;
+    if (finalRole !== 'analista') {
+      patch.aware_scope = null;
+      patch.aware_quality = false;
+    }
 
     await db('users').where({ id: user.id }).update(patch);
     const updated = await db('users').select(USER_COLS).where({ id: user.id }).first();

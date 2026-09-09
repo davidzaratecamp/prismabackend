@@ -132,7 +132,9 @@ router.get(
 // No exige AWARE_DB_* (vive en MySQL local).
 router.get(
   '/analytics/voxpro-quality',
-  asyncHandler(async (_req, res) => {
+  asyncHandler(async (req, res) => {
+    // Calidad IA es información interna: solo analistas con el flag `aware_quality`.
+    if (!req.user?.aware_quality) throw new HttpError(403, 'Sin acceso a Calidad IA');
     res.json(await service.getVoxproQuality());
   })
 );

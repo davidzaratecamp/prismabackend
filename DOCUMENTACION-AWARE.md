@@ -10,6 +10,10 @@ voicebot **SOFIA** sobre **Aware**. Interfaz única y **exclusiva del rol
   `NULL` = ve ambas campañas; `12` = solo Claro Hogar; `13` = solo Claro TyT.
   Se fuerza en `parseFilters` (`aware.routes.js`) sobre **todos** los endpoints y
   el front bloquea el selector de campaña. Se configura en Equipo → usuario.
+- **Acceso a Calidad IA** (`users.aware_quality`, migración `20260909100000`):
+  la pestaña "Calidad IA" y el endpoint `/analytics/voxpro-quality` son **solo
+  internos** — visibles únicamente para analistas con este flag. Los analistas de
+  Claro no la ven. Casilla en Equipo → usuario.
 - **Datos en vivo**: se consulta directo la BD PostgreSQL de Aware (solo lectura)
   con un caché de 60 s; el front refresca cada 60 s. No hay sincronización.
 - **Filtro de fecha**: rangos relativos (hoy / 7 / 30 / 90 d), mes concreto y
