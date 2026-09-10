@@ -14,6 +14,12 @@ voicebot **SOFIA** sobre **Aware**. Interfaz única y **exclusiva del rol
   la pestaña "Calidad IA" y el endpoint `/analytics/voxpro-quality` son **solo
   internos** — visibles únicamente para analistas con este flag. Los analistas de
   Claro no la ven. Casilla en Equipo → usuario.
+- **Vista del panel** (`users.aware_view`, migración `20260910100000`):
+  `full` (por defecto) = todas las pestañas; `basico` = **solo Resumen +
+  Consolidado**. Con `basico` el backend responde 403 a cualquier endpoint fuera
+  de ese conjunto (`BASIC_ALLOW` en `aware.routes.js`), no solo se ocultan
+  pestañas. Se combina con `aware_scope` (p. ej. `basico` + Hogar). Select en
+  Equipo → usuario.
 - **Datos en vivo**: se consulta directo la BD PostgreSQL de Aware (solo lectura)
   con un caché de 60 s; el front refresca cada 60 s. No hay sincronización.
 - **Filtro de fecha**: rangos relativos (hoy / 7 / 30 / 90 d), mes concreto y

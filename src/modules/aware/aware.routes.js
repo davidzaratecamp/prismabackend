@@ -29,6 +29,20 @@ router.post(
 // Panel exclusivo del rol `analista` (por ahora los admin no acceden aquí).
 router.use(requireAuth, requireRole('analista'));
 
+// Vista "básica" (users.aware_view = 'basico'): solo los endpoints que alimentan
+// Resumen y Consolidado. El resto responde 403 aunque se llame directo a la API.
+const BASIC_ALLOW = [
+  /^\/config$/,
+  /^\/analytics\/(filters|overview|period-comparison|funnel|volume-by-day|daily-trend|hangup|sentiment|service-types)$/,
+  /^\/deliverable(\/.*|\.csv|\.json)?$/,
+];
+router.use((req, _res, next) => {
+  if (req.user?.aware_view !== 'basico') return next();
+  const p = req.path.replace(/^\/api\/aware/, '') || req.path;
+  if (BASIC_ALLOW.some((rx) => rx.test(p))) return next();
+  next(new HttpError(403, 'Vista restringida a Resumen y Consolidado'));
+});
+
 // Todo lo que consulta Aware exige la conexión configurada.
 function ensureConfigured(_req, _res, next) {
   if (!isAwareConfigured()) {

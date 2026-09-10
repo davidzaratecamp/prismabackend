@@ -31,6 +31,7 @@ const publicUser = (u) => ({
   area_id: u.area_id,
   aware_scope: u.aware_scope ?? null,
   aware_quality: !!u.aware_quality,
+  aware_view: u.aware_view || 'full',
   avatar_color: u.avatar_color,
 });
 
