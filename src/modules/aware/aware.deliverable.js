@@ -293,10 +293,13 @@ const MAX_EXPORT = 20000;
 const CHUNK = 1000;
 
 const CSV_COLS = [
-  ['id_llamada', (x) => x.call_id],
+  // Por pedido explícito: en el CSV "id_llamada" lleva el teléfono del cliente
+  // y "telefono_cliente" lleva el call_id (invertido respecto al nombre de la
+  // columna — ver commit "consolidado: invertir ID único / Teléfono").
+  ['id_llamada', (x) => x.telefono],
   ['fecha', (x) => x.fecha],
   ['hora', (x) => x.hora],
-  ['telefono_cliente', (x) => x.telefono],
+  ['telefono_cliente', (x) => x.call_id],
   ['numero_ivr_claro', (x) => x.numero_ivr],
   ['did', (x) => x.did],
   ['did_cola', (x) => x.did_cola],
@@ -366,6 +369,10 @@ export async function streamDeliverable(f, format, res) {
         row.transcripcion_ia_texto = flattenTranscript(x.transcript_object);
         res.write(CSV_COLS.map((c) => csvCell(c[1](row))).join(';') + '\r\n');
       } else {
+        // mismo pedido: invertir call_id <-> telefono en el JSON exportado.
+        const swap = row.telefono;
+        row.telefono = row.call_id;
+        row.call_id = swap;
         row.transcripcion_ia = Array.isArray(x.transcript_object) ? x.transcript_object : [];
         res.write((first ? '' : ',') + JSON.stringify(row));
         first = false;
