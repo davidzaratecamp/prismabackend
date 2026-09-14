@@ -151,7 +151,7 @@ router.get(
     if (req.user?.role !== 'admin' && !req.user?.aware_quality) {
       throw new HttpError(403, 'Sin acceso a Calidad IA');
     }
-    res.json(await service.getVoxproQuality());
+    res.json(await service.getVoxproQuality(parseFilters(req)));
   })
 );
 

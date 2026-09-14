@@ -1089,38 +1089,66 @@ export function getAgentRanking(f = {}) {
 
 /* ───────────────────────── abandono en cola (v_abandono) ───────────────────────── */
 
+// Las colas de Asterisk de v_abandono (3006-3019) no están mapeadas a
+// proyecto_id en Aware (no hay tabla ni columna que lo diga, y `cdr_custom` no
+// es accesible para el usuario `analista`). Se atribuye cada abandono a la
+// campaña de la última llamada de SOFIA transferida del mismo teléfono ese
+// mismo día — igual heurístico que HUMAN_MATCH. ~65-70% de los abandonos
+// encuentran match; el resto queda sin atribuir (proyecto_id NULL) y no
+// entra en el total por campaña.
+//
+// `vb_respuesta` (la tabla detrás de v_voicebot_result) no tiene índice en
+// telefono/fecha, así que un LATERAL correlacionado por fila de v_abandono
+// escanea la tabla completa por cada abandono (timeout). Se materializa
+// `transfers` UNA sola vez (filtrado por fecha) y se correlaciona en memoria.
+async function abandonRows(from, to) {
+  return awareQuery(
+    `WITH transfers AS MATERIALIZED (
+       SELECT telefono, fecha, hora, proyecto_id
+       FROM v_voicebot_result
+       WHERE hangup_reason = 'call_transfer' AND fecha BETWEEN $1 AND $2
+     )
+     SELECT a.fecha::text AS day, a.cola, a.tiempo_espera,
+       (SELECT t.proyecto_id FROM transfers t
+        WHERE t.telefono = a.telefono AND t.fecha = a.fecha AND t.hora < a.hora
+        ORDER BY t.hora DESC LIMIT 1) AS proyecto_id
+     FROM v_abandono a
+     WHERE a.fecha BETWEEN $1 AND $2`,
+    [from, to]
+  );
+}
+
 export function getQueueAbandon(f = {}) {
   const r = resolveFilters(f);
-  return cached(key('queue-abandon', { proyectoIds: [0], from: r.from, to: r.to }), 120000, async () => {
-    const [[tot], byDay, byQueue] = await Promise.all([
-      awareQuery(
-        `SELECT COUNT(*)::int AS total,
-                COALESCE(ROUND(AVG(tiempo_espera)), 0)::int AS avg_espera,
-                COALESCE(ROUND(MAX(tiempo_espera)), 0)::int AS max_espera
-         FROM v_abandono WHERE fecha BETWEEN $1 AND $2`,
-        [r.from, r.to]
-      ),
-      awareQuery(
-        `SELECT fecha::text AS day, COUNT(*)::int AS abandonos,
-                COALESCE(ROUND(AVG(tiempo_espera)), 0)::int AS avg_espera
-         FROM v_abandono WHERE fecha BETWEEN $1 AND $2
-         GROUP BY fecha ORDER BY fecha`,
-        [r.from, r.to]
-      ),
-      awareQuery(
-        `SELECT cola, COUNT(*)::int AS abandonos
-         FROM v_abandono WHERE fecha BETWEEN $1 AND $2
-         GROUP BY cola ORDER BY abandonos DESC LIMIT 12`,
-        [r.from, r.to]
-      ),
-    ]);
+  return cached(key('queue-abandon', r), 120000, async () => {
+    const rows = await abandonRows(r.from, r.to);
+    const own = rows.filter((x) => r.proyectoIds.includes(x.proyecto_id));
+    const matched = rows.filter((x) => x.proyecto_id != null).length;
+
+    const avg = (list) => (list.length ? Math.round(list.reduce((s, x) => s + num(x.tiempo_espera), 0) / list.length) : 0);
+    const byDay = new Map();
+    for (const x of own) {
+      const e = byDay.get(x.day) || { day: x.day, list: [] };
+      e.list.push(x);
+      byDay.set(x.day, e);
+    }
+    const byQueue = new Map();
+    for (const x of own) byQueue.set(x.cola, (byQueue.get(x.cola) || 0) + 1);
+
     return {
-      total: num(tot?.total),
-      avg_espera_s: num(tot?.avg_espera),
-      max_espera_s: num(tot?.max_espera),
-      by_day: byDay.map((x) => ({ day: x.day, abandonos: num(x.abandonos), avg_espera_s: num(x.avg_espera) })),
-      by_queue: byQueue.map((x) => ({ cola: x.cola, abandonos: num(x.abandonos) })),
-      note: 'Las colas de Asterisk no están mapeadas a campaña; el dato es del conjunto de colas humanas.',
+      total: own.length,
+      avg_espera_s: avg(own),
+      max_espera_s: own.reduce((m, x) => Math.max(m, num(x.tiempo_espera)), 0),
+      match_rate: rate(matched, rows.length),
+      by_day: [...byDay.values()]
+        .sort((a, b) => a.day.localeCompare(b.day))
+        .map((e) => ({ day: e.day, abandonos: e.list.length, avg_espera_s: avg(e.list) })),
+      by_queue: [...byQueue.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 12)
+        .map(([cola, abandonos]) => ({ cola, abandonos })),
+      approximate: true,
+      note: 'Atribuido por teléfono a la última transferencia de SOFIA del mismo día (heurístico, sin FK directa en Aware); lo que no encuentra match no se cuenta.',
     };
   });
 }
@@ -1286,7 +1314,7 @@ export async function saveVoxproSnapshot(payload) {
   await db('aware_voxpro_snapshot').insert(row).onConflict('id').merge(row);
 }
 
-export async function getVoxproQuality() {
+export async function getVoxproQuality(f = {}) {
   const row = await db('aware_voxpro_snapshot').where({ id: 1 }).first();
   if (!row) return { available: false };
   let payload = row.payload;
@@ -1301,7 +1329,19 @@ export async function getVoxproQuality() {
   // no desde updated_at de MySQL (ambigüedad de zona).
   const gen = payload && payload.generated_at ? new Date(payload.generated_at) : null;
   const ageMin = gen && !Number.isNaN(gen.getTime()) ? Math.round((Date.now() - gen.getTime()) / 60000) : null;
-  return { available: !!payload, age_minutes: ageMin, ...payload };
+  if (!payload) return { available: false, age_minutes: ageMin };
+
+  // VoxPro empuja 3 variantes (ambas / solo Hogar / solo TyT) en `variants` —
+  // se elige la que corresponde al alcance del usuario (aware_scope, forzado
+  // en parseFilters). Payloads viejos (antes de esta variante) no traen
+  // `variants`: se sirven tal cual, sin poder filtrar por campaña.
+  if (payload.variants) {
+    const r = resolveFilters(f);
+    const single = r.proyectoIds.length === 1 ? r.proyectoIds[0] : null;
+    const variant = (single && payload.variants[single]) || payload.variants.all;
+    return { available: !!variant, age_minutes: ageMin, generated_at: payload.generated_at, ...variant };
+  }
+  return { available: true, age_minutes: ageMin, ...payload };
 }
 
 export async function getConfig(f = {}) {
