@@ -1,8 +1,11 @@
 # Módulo: Analítica Aware / SOFIA
 
 Tablero de analítica del **inbound de Claro Hogar y Claro TyT** atendido por el
-voicebot **SOFIA** sobre **Aware**. Interfaz única y **exclusiva del rol
-`analista`** (por ahora los `admin` no acceden).
+voicebot **SOFIA** sobre **Aware**. Interfaz única para el rol `analista`
+(entra directo al panel, sin sidebar). Los `admin` también acceden, desde el
+ítem "Analítica Aware" del sidebar (`/admin/aware`, mismo patrón que "Retell IA"),
+sin restricción de campaña ni de pestañas (ven Calidad IA aunque no tengan el
+flag `aware_quality`, que es solo para analistas internos).
 
 - **Rol `analista`** → al iniciar sesión cae directo en este panel (`AnalystShell`),
   sin acceso a la app de Desarrollo ni al Portal.
@@ -73,7 +76,7 @@ Migración `20260903120000_add_analista_role.js` — amplía el enum `users.role
 
 ### Endpoints (`/api/aware`)
 
-Todos exigen JWT de rol `analista` (los admin no acceden por ahora). Query params comunes:
+Todos exigen JWT de rol `analista` o `admin`. Query params comunes:
 `from`, `to` (`YYYY-MM-DD`, hora Colombia), `proyecto` (`12` Hogar | `13` TyT | omitido = ambas).
 
 | Endpoint | Devuelve |

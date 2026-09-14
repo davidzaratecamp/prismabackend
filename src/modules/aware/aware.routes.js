@@ -26,8 +26,8 @@ router.post(
   })
 );
 
-// Panel exclusivo del rol `analista` (por ahora los admin no acceden aquí).
-router.use(requireAuth, requireRole('analista'));
+// Panel del rol `analista`; los `admin` también entran (ítem "Analítica Aware" en su sidebar).
+router.use(requireAuth, requireRole('analista', 'admin'));
 
 // Vista "básica" (users.aware_view = 'basico'): solo los endpoints que alimentan
 // Resumen y Consolidado. El resto responde 403 aunque se llame directo a la API.
@@ -147,8 +147,10 @@ router.get(
 router.get(
   '/analytics/voxpro-quality',
   asyncHandler(async (req, res) => {
-    // Calidad IA es información interna: solo analistas con el flag `aware_quality`.
-    if (!req.user?.aware_quality) throw new HttpError(403, 'Sin acceso a Calidad IA');
+    // Calidad IA es información interna: analistas con el flag `aware_quality`, o admin.
+    if (req.user?.role !== 'admin' && !req.user?.aware_quality) {
+      throw new HttpError(403, 'Sin acceso a Calidad IA');
+    }
     res.json(await service.getVoxproQuality());
   })
 );
