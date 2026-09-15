@@ -29,14 +29,23 @@ import { mapTip, normTipIA, TIP_IA_VALUES } from './aware.tipmap.js';
    HUMAN_MATCH de aware.service.js con nombre de asesor, duraciones y audiofile.
    Descarta con time_tmo > 0, NO time_speaking > 0: esa columna de Aware viene
    en 0 en ~20% de las gestiones reales de asesor (ver HUMAN_MATCH en
-   aware.service.js para el detalle del caso reportado 2026-09-15). */
+   aware.service.js para el detalle del caso reportado 2026-09-15).
+
+   `audiofile` también viene NULL en ~20% de las gestiones reales aunque la
+   grabación sí existe en el servidor de Aware — el nombre de archivo sigue
+   siempre el patrón `YYYY/MM/DD/Q-{telefono}-{uniqueid}` (verificado 100% en
+   200 filas con el campo lleno), así que se reconstruye como respaldo cuando
+   la columna viene vacía. Reportado 2026-09-15 junto con el bug de arriba. */
 const DELIV_LATERAL = `
   LEFT JOIN LATERAL (
     SELECT r.registro_llamada_id AS rid,
            r.proyecto_id AS h_proy,
            NULLIF(TRIM(r.json_data->>'agente'), '') AS asesor,
            r.time_tmo, r.time_speaking,
-           r.audiofile AS rl_audiofile,
+           COALESCE(
+             r.audiofile,
+             to_char(r.registro_llamada_fecha, 'YYYY/MM/DD') || '/Q-' || r.registro_llamada_fono || '-' || r.uniqueid
+           ) AS rl_audiofile,
            r.nomenclatura_id AS nom,
            r.uniqueid AS rl_uniqueid
     FROM registro_llamada r
