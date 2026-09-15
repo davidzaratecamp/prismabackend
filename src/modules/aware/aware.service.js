@@ -9,6 +9,7 @@ import {
 } from './aware.db.js';
 import { cached } from './aware.cache.js';
 import { db } from '../../db/knex.js'; // MySQL (prisma_db) — sólo para el snapshot de VoxPro
+import { normTipIA, TIP_IA_VALUES } from './aware.tipmap.js';
 
 /* ───────────────────────── helpers ───────────────────────── */
 
@@ -492,6 +493,51 @@ export function getDidBreakdown(f = {}) {
         })),
       approximate: true,
       note: 'DID exacto solo si la llamada se transfirió y se emparejó con la cola humana; el resto cae al DID principal de la campaña.',
+    };
+  });
+}
+
+/* ───────────────────────── tipificación IA de SOFIA ───────────────────────── */
+
+/**
+ * Cantidad y % de llamadas por tipificación que escribe SOFIA sola
+ * (`call_analysis.custom_analysis_data.CODIGO_TIPIFICACIONIA`), normalizada a
+ * los 8 valores oficiales (ver aware.tipmap.js). Lo que no encaja pero trae
+ * texto → "Sin estandarizar"; lo que no trae nada → "Sin dato".
+ */
+export function getSofiaTipificacion(f = {}) {
+  const r = resolveFilters(f);
+  return cached(key('sofia-tipificacion', r), 60000, async () => {
+    const rows = await awareQuery(
+      `SELECT NULLIF(TRIM(call_analysis->'custom_analysis_data'->>'CODIGO_TIPIFICACIONIA'), '') AS raw,
+              COUNT(*)::int AS calls
+       FROM v_voicebot_result
+       WHERE ${BASE_WHERE}
+       GROUP BY raw`,
+      baseParams(r)
+    );
+    const buckets = new Map(TIP_IA_VALUES.map((v) => [v, 0]));
+    let sinEstandarizar = 0;
+    let sinDato = 0;
+    for (const x of rows) {
+      const n = num(x.calls);
+      if (!x.raw) {
+        sinDato += n;
+        continue;
+      }
+      const norm = normTipIA(x.raw);
+      if (norm) buckets.set(norm, (buckets.get(norm) || 0) + n);
+      else sinEstandarizar += n;
+    }
+    const total = [...buckets.values()].reduce((s, n) => s + n, 0) + sinEstandarizar + sinDato;
+    const rowsOut = [...buckets.entries()].map(([tipificacion, calls]) => ({ tipificacion, calls }));
+    if (sinEstandarizar) rowsOut.push({ tipificacion: 'Sin estandarizar', calls: sinEstandarizar });
+    if (sinDato) rowsOut.push({ tipificacion: 'Sin dato', calls: sinDato });
+    return {
+      total,
+      rows: rowsOut
+        .sort((a, b) => b.calls - a.calls)
+        .map((x) => ({ ...x, rate: rate(x.calls, total) })),
     };
   });
 }
