@@ -26,7 +26,10 @@ import { resolveFilters, baseParams, num } from './aware.service.js';
 import { mapTip, normTipIA, TIP_IA_VALUES } from './aware.tipmap.js';
 
 /* LATERAL: continuación humana de la transferencia + su tipificación. Extiende el
-   HUMAN_MATCH de aware.service.js con nombre de asesor, duraciones y audiofile. */
+   HUMAN_MATCH de aware.service.js con nombre de asesor, duraciones y audiofile.
+   Descarta con time_tmo > 0, NO time_speaking > 0: esa columna de Aware viene
+   en 0 en ~20% de las gestiones reales de asesor (ver HUMAN_MATCH en
+   aware.service.js para el detalle del caso reportado 2026-09-15). */
 const DELIV_LATERAL = `
   LEFT JOIN LATERAL (
     SELECT r.registro_llamada_id AS rid,
@@ -42,7 +45,7 @@ const DELIV_LATERAL = `
       AND r.registro_llamada_fono  = v.telefono
       AND r.registro_llamada_fecha = v.fecha
       AND r.registro_llamada_hora  > v.hora
-      AND r.time_speaking > 0
+      AND r.time_tmo > 0
     ORDER BY r.registro_llamada_hora
     LIMIT 1
   ) h ON true

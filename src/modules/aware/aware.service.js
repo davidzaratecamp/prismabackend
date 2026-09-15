@@ -440,7 +440,7 @@ const HUMAN_MATCH_QUEUE = `
       AND r.registro_llamada_fono  = v.telefono
       AND r.registro_llamada_fecha = v.fecha
       AND r.registro_llamada_hora  > v.hora
-      AND r.time_speaking > 0
+      AND r.time_tmo > 0
     ORDER BY r.registro_llamada_hora
     LIMIT 1
   ) h ON true`;
@@ -552,17 +552,7 @@ export function getTransfersAttended(f = {}) {
               COUNT(*)::int AS transfers,
               COUNT(h.rid)::int AS attended
        FROM v_voicebot_result v
-       LEFT JOIN LATERAL (
-         SELECT r.registro_llamada_id AS rid
-         FROM registro_llamada r
-         WHERE r.proyecto_id = ANY(CASE WHEN v.proyecto_id = 12 THEN ARRAY[7,9] ELSE ARRAY[10,11] END)
-           AND r.registro_llamada_fono  = v.telefono
-           AND r.registro_llamada_fecha = v.fecha
-           AND r.registro_llamada_hora  > v.hora
-           AND r.time_speaking > 0
-         ORDER BY r.registro_llamada_hora
-         LIMIT 1
-       ) h ON true
+       ${HUMAN_MATCH}
        WHERE v.proyecto_id = ANY($1::int[])
          AND v.fecha BETWEEN $2 AND $3
          AND v.hangup_reason = 'call_transfer'
@@ -687,7 +677,15 @@ export async function getCall(callId) {
 
 /* ───────────────────────── recorrido / embudo ───────────────────────── */
 
-// subquery LATERAL que busca la continuación humana de una transferencia
+// subquery LATERAL que busca la continuación humana de una transferencia.
+//
+// Se descarta con `time_tmo > 0`, NO `time_speaking > 0`: la columna
+// `time_speaking` de Aware viene en 0 en ~20% de las gestiones reales de
+// asesor (confirmado contra `time_tmo` y `json_data.time_speaking`, que sí
+// coinciden entre sí) — un defecto de esa columna específica en el origen,
+// no un abandono real. Usar `time_speaking` aquí perdía llamadas atendidas
+// de verdad (ej. registro_llamada_id 145286, UTIL NEGATIVO, time_speaking=0
+// pero time_tmo=93 — reportado 2026-09-15).
 const HUMAN_MATCH = `
   LEFT JOIN LATERAL (
     SELECT r.registro_llamada_id AS rid
@@ -697,7 +695,7 @@ const HUMAN_MATCH = `
       AND r.registro_llamada_fono  = v.telefono
       AND r.registro_llamada_fecha = v.fecha
       AND r.registro_llamada_hora  > v.hora
-      AND r.time_speaking > 0
+      AND r.time_tmo > 0
     ORDER BY r.registro_llamada_hora
     LIMIT 1
   ) h ON true`;
@@ -712,7 +710,7 @@ const HUMAN_MATCH_TIP = `
       AND r.registro_llamada_fono  = v.telefono
       AND r.registro_llamada_fecha = v.fecha
       AND r.registro_llamada_hora  > v.hora
-      AND r.time_speaking > 0
+      AND r.time_tmo > 0
     ORDER BY r.registro_llamada_hora
     LIMIT 1
   ) h ON true`;
