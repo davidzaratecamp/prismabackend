@@ -1,4 +1,12 @@
-import { awareQuery, isAwareConfigured, PROY, BOT_PROY_IDS, AUDIO_BASE_URL } from './aware.db.js';
+import {
+  awareQuery,
+  isAwareConfigured,
+  PROY,
+  BOT_PROY_IDS,
+  AUDIO_BASE_URL,
+  DID_BY_QUEUE,
+  DID_PRIMARY_BY_PROY,
+} from './aware.db.js';
 import { cached } from './aware.cache.js';
 import { db } from '../../db/knex.js'; // MySQL (prisma_db) — sólo para el snapshot de VoxPro
 
@@ -415,6 +423,70 @@ export function getByProject(f = {}) {
       success_rate: rate(x.ok, x.analyzed),
       positive_rate: rate(x.pos, x.sent_total),
     }));
+  });
+}
+
+/* ───────────────────────── llamadas por DID (línea marcada) ───────────────────────── */
+
+// Igual que DELIV_LATERAL/HUMAN_MATCH del entregable, pero solo trae la cola
+// humana (h_proy) — es lo único que hace falta para resolver el DID.
+const HUMAN_MATCH_QUEUE = `
+  LEFT JOIN LATERAL (
+    SELECT r.proyecto_id AS h_proy
+    FROM registro_llamada r
+    WHERE v.hangup_reason = 'call_transfer'
+      AND r.proyecto_id = ANY(CASE WHEN v.proyecto_id = 12 THEN ARRAY[7,9] ELSE ARRAY[10,11] END)
+      AND r.registro_llamada_fono  = v.telefono
+      AND r.registro_llamada_fecha = v.fecha
+      AND r.registro_llamada_hora  > v.hora
+      AND r.time_speaking > 0
+    ORDER BY r.registro_llamada_hora
+    LIMIT 1
+  ) h ON true`;
+
+/**
+ * Llamadas y transferencias por DID (línea marcada por Claro), mismo criterio
+ * que el campo 8 del entregable: exacto si hubo transferencia atendida por
+ * una cola humana concreta (7/9 Hogar, 10/11 TyT); si no, cae al DID
+ * principal de la campaña (no se puede saber si entró por la línea 1 o la 2).
+ */
+export function getDidBreakdown(f = {}) {
+  const r = resolveFilters(f);
+  return cached(key('did-breakdown', r), 60000, async () => {
+    const rows = await awareQuery(
+      `SELECT v.proyecto_id, v.hangup_reason, h.h_proy, COUNT(*)::int AS calls
+       FROM v_voicebot_result v
+       ${HUMAN_MATCH_QUEUE}
+       WHERE ${BASE_WHERE}
+       GROUP BY v.proyecto_id, v.hangup_reason, h.h_proy`,
+      baseParams(r)
+    );
+    const buckets = new Map(); // did -> { did, cola, calls, transfers }
+    for (const x of rows) {
+      const didHit = x.h_proy != null ? DID_BY_QUEUE[x.h_proy] : null;
+      const didInfo = didHit || DID_PRIMARY_BY_PROY[x.proyecto_id];
+      if (!didInfo) continue;
+      const e = buckets.get(didInfo.did) || { did: didInfo.did, cola: didInfo.cola, calls: 0, transfers: 0 };
+      e.calls += num(x.calls);
+      if (x.hangup_reason === 'call_transfer') e.transfers += num(x.calls);
+      buckets.set(didInfo.did, e);
+    }
+    const list = [...buckets.values()];
+    const total = list.reduce((s, e) => s + e.calls, 0);
+    return {
+      by_did: list
+        .sort((a, b) => b.calls - a.calls)
+        .map((e) => ({
+          did: e.did,
+          cola: e.cola,
+          calls: e.calls,
+          transfers: e.transfers,
+          call_share: rate(e.calls, total),
+          transfer_rate: rate(e.transfers, e.calls),
+        })),
+      approximate: true,
+      note: 'DID exacto solo si la llamada se transfirió y se emparejó con la cola humana; el resto cae al DID principal de la campaña.',
+    };
   });
 }
 

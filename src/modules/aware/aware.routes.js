@@ -33,7 +33,7 @@ router.use(requireAuth, requireRole('analista', 'admin'));
 // Resumen y Consolidado. El resto responde 403 aunque se llame directo a la API.
 const BASIC_ALLOW = [
   /^\/config$/,
-  /^\/analytics\/(filters|overview|period-comparison|funnel|volume-by-day|daily-trend|hangup|sentiment|service-types)$/,
+  /^\/analytics\/(filters|overview|period-comparison|funnel|volume-by-day|daily-trend|hangup|sentiment|service-types|did-breakdown)$/,
   /^\/deliverable(\/.*|\.csv|\.json)?$/,
 ];
 router.use((req, _res, next) => {
@@ -96,6 +96,7 @@ const analytics = {
   'service-types': service.getServiceTypes,
   'duration-buckets': service.getDurationBuckets,
   'by-project': service.getByProject,
+  'did-breakdown': service.getDidBreakdown,
   'transfers-attended': service.getTransfersAttended,
   // recorrido / embudo
   funnel: service.getFunnel,
