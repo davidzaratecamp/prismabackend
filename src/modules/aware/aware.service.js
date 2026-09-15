@@ -473,6 +473,7 @@ export function getDidBreakdown(f = {}) {
     }
     const list = [...buckets.values()];
     const total = list.reduce((s, e) => s + e.calls, 0);
+    const totalTransfers = list.reduce((s, e) => s + e.transfers, 0);
     return {
       by_did: list
         .sort((a, b) => b.calls - a.calls)
@@ -482,7 +483,12 @@ export function getDidBreakdown(f = {}) {
           calls: e.calls,
           transfers: e.transfers,
           call_share: rate(e.calls, total),
-          transfer_rate: rate(e.transfers, e.calls),
+          // Ojo: NO es la tasa de transferencia propia de la línea (esa da
+          // siempre 100% en la secundaria, por construcción del heurístico —
+          // solo se identifica una llamada de la línea 2 cuando SÍ se
+          // transfirió). Es la porción de las transferencias totales que
+          // vino por cada línea — esta sí suma 100% entre todas las líneas.
+          transfer_share: rate(e.transfers, totalTransfers),
         })),
       approximate: true,
       note: 'DID exacto solo si la llamada se transfirió y se emparejó con la cola humana; el resto cae al DID principal de la campaña.',
