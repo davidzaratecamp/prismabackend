@@ -53,8 +53,12 @@ const VENTAS = ['si', 'no'];
 const TIP_IA_CODE = "v.call_analysis->'custom_analysis_data'->>'CODIGO_TIPIFICACIONIA'";
 
 /** Traduce los filtros opcionales del entregable a condiciones SQL. */
-function extraConds({ estado, venta, tip, tipIa }, params) {
+function extraConds({ estado, venta, tip, tipIa, phone }, params) {
   const extra = [];
+  if (phone) {
+    params.push(`%${phone}%`);
+    extra.push(`v.telefono ILIKE $${params.length}`);
+  }
   if (estado === 'transferido') {
     extra.push(`v.hangup_reason = 'call_transfer' AND h.rid IS NOT NULL AND h.nom IS DISTINCT FROM 'ABN'`);
   } else if (estado === 'abandonado') {
@@ -78,9 +82,9 @@ function extraConds({ estado, venta, tip, tipIa }, params) {
   return extra;
 }
 
-async function runQuery(r, { estado, venta, tip, tipIa, limit, offset, withTranscript }) {
+async function runQuery(r, { estado, venta, tip, tipIa, phone, limit, offset, withTranscript }) {
   const params = baseParams(r); // [proyectoIds, from, to]
-  const extra = extraConds({ estado, venta, tip, tipIa }, params);
+  const extra = extraConds({ estado, venta, tip, tipIa, phone }, params);
   const where = [
     'v.proyecto_id = ANY($1::int[])',
     'v.fecha BETWEEN $2 AND $3',
@@ -218,6 +222,9 @@ function normFilters(f = {}) {
       tipIaIn === '__none__'
         ? '__none__'
         : TIP_IA_VALUES.includes(tipIaIn) ? tipIaIn : null,
+    // "ID único" en el front es en realidad el teléfono (columnas invertidas
+    // a pedido de Claro) — se busca por coincidencia parcial de dígitos.
+    phone: f.phone ? String(f.phone).replace(/\D/g, '').slice(0, 15) : null,
   };
 }
 
@@ -228,7 +235,7 @@ export function buildDeliverable(f = {}) {
   const page = Math.max(1, Number(f.page) || 1);
   const pageSize = Math.min(500, Math.max(1, Number(f.pageSize) || 100));
   const nf = normFilters(f);
-  const ck = `deliverable:${r.proyectoIds.join(',')}:${r.from}:${r.to}:${nf.estado || ''}:${nf.venta || ''}:${nf.tip || ''}:${nf.tipIa || ''}:${page}:${pageSize}`;
+  const ck = `deliverable:${r.proyectoIds.join(',')}:${r.from}:${r.to}:${nf.estado || ''}:${nf.venta || ''}:${nf.tip || ''}:${nf.tipIa || ''}:${nf.phone || ''}:${page}:${pageSize}`;
 
   return cached(ck, 120000, async () => {
     const { rows, total } = await runQuery(r, {
