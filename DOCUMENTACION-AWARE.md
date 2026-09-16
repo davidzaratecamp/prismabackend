@@ -187,23 +187,35 @@ Todos exigen JWT de rol `analista` o `admin`. Query params comunes:
 
 ## 7. Calidad IA — integración con VoxPro
 
-Los scores de auditoría IA sólo existen en VoxPro (MySQL de `200.91.204.51`). Los
-dos servidores **no se ven por HTTP** entre sí, así que el flujo es **push**:
+Los scores de auditoría IA sólo existen en VoxPro (MySQL de `200.91.204.51`).
+**Sí hay conectividad directa** entre los dos servidores (verificado en vivo
+2026-09-16 — la doc anterior decía que no, era una suposición nunca probada).
+Flujo actual, en dos capas:
 
 ```
-VoxPro (job cada 20 min)  ──POST snapshot──▶  Prisma  ──▶  tabla aware_voxpro_snapshot (1 fila)
-  src/jobs/pushPrismaSnapshot.js                 POST /api/aware/voxpro-snapshot (token servicio)
-  src/services/SofiaQualityService.js            GET  /api/aware/analytics/voxpro-quality (rol analista)
+Petición del panel ──GET en vivo──▶ VoxPro (rango exacto: día/mes/rango elegido)
+  aware.service.js fetchVoxproLive()   GET /api/prisma-analytics/sofia-quality?from=&to=&proyectos=
+                                        src/routes/prismaAnalytics.routes.js (token servicio)
+                                        src/services/SofiaQualityService.js (acepta from/to o days)
+
+Si falla (timeout/caído) ──▶ respaldo: snapshot fijo de 30 días que VoxPro empuja cada 20 min
+  VoxPro: src/jobs/pushPrismaSnapshot.js   POST /api/aware/voxpro-snapshot (token servicio)
+  Prisma: tabla aware_voxpro_snapshot (1 fila)
 ```
 
 - Token compartido: `PRISMA_ANALYTICS_TOKEN` (VoxPro) = `VOXPRO_ANALYTICS_TOKEN` (Prisma).
-- VoxPro también expone `GET /api/prisma-analytics/sofia-quality` con el mismo token
-  (por si algún día hay conectividad directa).
-- El snapshot trae: score del bot por campaña + distribución + `missed_transfer`;
+- `VOXPRO_API_URL` en Prisma (default `http://200.91.204.51`) — base para la llamada en vivo.
+- La respuesta trae `live: true/false` para que el front sepa si el rango mostrado
+  es exacto (petición en vivo) o el respaldo de 30 días fijos (snapshot).
+- `sofia_continuation_audits` (pata humana) filtra por su columna `fecha` (la
+  fecha real de la llamada) — más preciso que `created_at` (cuándo se auditó),
+  que es lo que sigue usando `voicebot_call_audits` (pata del bot) al no tener
+  columna de fecha propia.
+- El snapshot de respaldo trae: score del bot por campaña + distribución + `missed_transfer`;
   continuación humana (`not_found` rate ≈ 28 %, score medio del asesor ≈ 31 — bajo
   porque cualquier falla de "alto impacto" lo lleva a 0), y ranking de asesores con
-  nombre real.
-- Si el job de VoxPro se cae, el panel muestra "desactualizado hace X min".
+  nombre real. Solo se usa si la llamada en vivo falla.
+- Si ambos fallan (VoxPro caído y sin snapshot previo), el panel muestra "Aún no hay datos".
 
 ## 8. Entregable por llamada (14 campos Claro)
 

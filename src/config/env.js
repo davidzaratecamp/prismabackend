@@ -59,8 +59,13 @@ export const env = {
     user: process.env.AWARE_DB_USER || 'analista',
     password: process.env.AWARE_DB_PASSWORD || '',
     audioBaseUrl: process.env.AWARE_AUDIO_BASE_URL || 'https://asiste.awareccm.com/audiofiles',
-    // Token compartido con VoxPro para recibir el snapshot de calidad IA (push).
+    // Token compartido con VoxPro para recibir el snapshot de calidad IA (push)
+    // y para llamar en vivo a /api/prisma-analytics/sofia-quality (mismo token).
     voxproToken: process.env.VOXPRO_ANALYTICS_TOKEN || '',
+    // Base del API de VoxPro — sí hay conectividad directa (verificado 2026-09-16),
+    // se usa para pedir Calidad IA con el día/mes/rango exacto que elige el
+    // usuario, en vez de depender solo del snapshot fijo de 30 días.
+    voxproApiUrl: process.env.VOXPRO_API_URL || 'http://200.91.204.51',
   },
 };
 

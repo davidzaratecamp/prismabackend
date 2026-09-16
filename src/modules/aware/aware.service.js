@@ -10,6 +10,7 @@ import {
 import { cached } from './aware.cache.js';
 import { db } from '../../db/knex.js'; // MySQL (prisma_db) — sólo para el snapshot de VoxPro
 import { normTipIA, TIP_IA_VALUES } from './aware.tipmap.js';
+import { env } from '../../config/env.js';
 
 /* ───────────────────────── helpers ───────────────────────── */
 
@@ -1436,7 +1437,29 @@ export async function saveVoxproSnapshot(payload) {
   await db('aware_voxpro_snapshot').insert(row).onConflict('id').merge(row);
 }
 
-export async function getVoxproQuality(f = {}) {
+/**
+ * Pide a VoxPro el snapshot de calidad IA EN VIVO, con el día/mes/rango
+ * exacto que haya elegido el usuario en Prisma — no el fijo de 30 días.
+ * Hay conectividad directa (verificado 2026-09-16, antes se creía que no).
+ * Devuelve null si VoxPro no responde a tiempo o falla; nunca lanza.
+ */
+async function fetchVoxproLive(r) {
+  if (!env.aware.voxproToken) return null;
+  const params = new URLSearchParams({ from: r.from, to: r.to, proyectos: r.proyectoIds.join(',') });
+  try {
+    const res = await fetch(`${env.aware.voxproApiUrl}/api/prisma-analytics/sofia-quality?${params}`, {
+      headers: { Authorization: `Bearer ${env.aware.voxproToken}` },
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+/** Snapshot fijo de 30 días que VoxPro empuja cada 20 min — respaldo si falla la llamada en vivo. */
+async function getVoxproSnapshotFallback(r) {
   const row = await db('aware_voxpro_snapshot').where({ id: 1 }).first();
   if (!row) return { available: false };
   let payload = row.payload;
@@ -1458,12 +1481,22 @@ export async function getVoxproQuality(f = {}) {
   // en parseFilters). Payloads viejos (antes de esta variante) no traen
   // `variants`: se sirven tal cual, sin poder filtrar por campaña.
   if (payload.variants) {
-    const r = resolveFilters(f);
     const single = r.proyectoIds.length === 1 ? r.proyectoIds[0] : null;
     const variant = (single && payload.variants[single]) || payload.variants.all;
-    return { available: !!variant, age_minutes: ageMin, generated_at: payload.generated_at, ...variant };
+    return { available: !!variant, live: false, age_minutes: ageMin, generated_at: payload.generated_at, ...variant };
   }
-  return { available: true, age_minutes: ageMin, ...payload };
+  return { available: true, live: false, age_minutes: ageMin, ...payload };
+}
+
+export async function getVoxproQuality(f = {}) {
+  const r = resolveFilters(f);
+  const live = await cached(key('voxpro-quality-live', r), 90000, () => fetchVoxproLive(r));
+  if (live) {
+    const gen = live.generated_at ? new Date(live.generated_at) : null;
+    const ageMin = gen && !Number.isNaN(gen.getTime()) ? Math.round((Date.now() - gen.getTime()) / 60000) : null;
+    return { available: true, live: true, age_minutes: ageMin, ...live };
+  }
+  return getVoxproSnapshotFallback(r);
 }
 
 export async function getConfig(f = {}) {
