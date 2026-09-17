@@ -9,6 +9,12 @@
  * 10 estado (Transferido/Abandonado/Gestión IA) · 11 venta (Sí/No) ·
  * 12 tipificación (árbol de Claro) · 13 transcripción SOFIA↔cliente ·
  * 14 URL grabación (IA + asesor).
+ *
+ * Añadido 2026-09-17 (no estaba en los 14 originales): motivo_rechazo — el
+ * detalle detrás de la tipificación UN (Útil Negativo), que es ~87% de las
+ * gestiones del asesor. Viene de registro_llamada.json_data.motivo_rechazo_texto
+ * en Aware, solo existe cuando nomenclatura_id = 'UN'. Reportado por el usuario
+ * (pantallazo de la vista "Gestión" de Aware, columna MOTIVO RECHAZO).
  */
 import {
   awareQuery,
@@ -48,7 +54,8 @@ const DELIV_LATERAL = `
              to_char(r.registro_llamada_fecha, 'YYYY/MM/DD') || '/Q-' || r.registro_llamada_fono || '-' || r.uniqueid
            ) AS rl_audiofile,
            r.nomenclatura_id AS nom,
-           r.uniqueid AS rl_uniqueid
+           r.uniqueid AS rl_uniqueid,
+           NULLIF(TRIM(r.json_data->>'motivo_rechazo_texto'), '') AS motivo_rechazo
     FROM registro_llamada r
     WHERE v.hangup_reason = 'call_transfer'
       AND r.proyecto_id = ANY(CASE WHEN v.proyecto_id = 12 THEN ARRAY[7,9] ELSE ARRAY[10,11] END)
@@ -117,7 +124,7 @@ async function runQuery(r, { estado, venta, tip, tipIa, phone, limit, offset, wi
             v.call_analysis->'custom_analysis_data'->>'CODIGO_TIPIFICACIONIA' AS tip_ia_raw,
             COALESCE(jsonb_array_length(v.transcript_object), 0)::int AS ia_turnos,
             ${withTranscript ? 'v.transcript_object,' : ''}
-            h.rid, h.h_proy, h.asesor, h.time_tmo, h.time_speaking, h.rl_audiofile, h.nom, h.rl_uniqueid,
+            h.rid, h.h_proy, h.asesor, h.time_tmo, h.time_speaking, h.rl_audiofile, h.nom, h.rl_uniqueid, h.motivo_rechazo,
             tc.nomenclatura_nombre AS tc_nombre, tc.contacto_efectivo AS tc_efectivo,
             COUNT(*) OVER()::int AS total_rows
      FROM v_voicebot_result v
@@ -143,6 +150,12 @@ async function retellDids(callIds) {
     // si la tabla de Retell aún no existe, el DID cae al canónico por proyecto
   }
   return map;
+}
+
+/** Limpia el texto libre de motivo_rechazo (mayúsculas/minúsculas mezcladas, tabs, espacios dobles). */
+function normMotivo(raw) {
+  if (!raw) return null;
+  return String(raw).replace(/\s+/g, ' ').trim().toUpperCase();
 }
 
 function estadoOf(x) {
@@ -220,6 +233,10 @@ function mapRow(x, retellMap) {
     tipificacion_asesor_codigo: tip?.codigo ?? null,
     tipificacion_asesor_nombre: tip?.nombre ?? (x.tc_nombre || null),
     tipificacion_asesor_grupo: tip?.grupo ?? (x.tc_efectivo || null),
+    // Solo existe cuando la tipificación del asesor es UN (Útil Negativo) — el
+    // motivo puntual del rechazo (soporte técnico, sin cobertura, facturación,
+    // etc.). Texto libre de Aware, normalizado a mayúsculas.
+    motivo_rechazo: transferido ? normMotivo(x.motivo_rechazo) : null,
     transcripcion_ia_turnos: num(x.ia_turnos),
     grabacion_ia_url: x.ia_audiofile ? `${AUDIO_BASE_URL}/${x.ia_audiofile}` : null,
     grabacion_asesor_url:
@@ -284,7 +301,7 @@ export async function getDeliverableCall(callId) {
             v.call_analysis->'custom_analysis_data'->>'CODIGO_TIPIFICACIONIA' AS tip_ia_raw,
             COALESCE(jsonb_array_length(v.transcript_object), 0)::int AS ia_turnos,
             v.transcript_object, v.call_analysis, v.telefono,
-            h.rid, h.h_proy, h.asesor, h.time_tmo, h.time_speaking, h.rl_audiofile, h.nom, h.rl_uniqueid,
+            h.rid, h.h_proy, h.asesor, h.time_tmo, h.time_speaking, h.rl_audiofile, h.nom, h.rl_uniqueid, h.motivo_rechazo,
             tc.nomenclatura_nombre AS tc_nombre, tc.contacto_efectivo AS tc_efectivo
      FROM v_voicebot_result v
      ${DELIV_LATERAL}
@@ -340,6 +357,7 @@ const CSV_COLS = [
   ['tipificacion_asesor_codigo', (x) => x.tipificacion_asesor_codigo],
   ['tipificacion_asesor_nombre', (x) => x.tipificacion_asesor_nombre],
   ['tipificacion_asesor_grupo', (x) => x.tipificacion_asesor_grupo],
+  ['motivo_rechazo', (x) => x.motivo_rechazo],
   ['tipo_servicio', (x) => x.tipo_servicio],
   ['transcripcion_ia', (x) => x.transcripcion_ia_texto],
   ['grabacion_ia_url', (x) => x.grabacion_ia_url],
