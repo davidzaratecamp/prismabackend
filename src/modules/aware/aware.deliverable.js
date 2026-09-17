@@ -17,6 +17,7 @@ import {
   AUDIO_BASE_URL,
   DID_BY_QUEUE,
   DID_PRIMARY_BY_PROY,
+  DID_LABELS,
   SEGMENT_BY_PROY,
   CLARO_IVR_NUMBER,
 } from './aware.db.js';
@@ -199,7 +200,10 @@ function mapRow(x, retellMap) {
     duracion_ia_seg: durIa,
     duracion_asesor_seg: durAsesor,
     duracion_total_seg: durTotal,
-    did: didInfo?.did ?? null,
+    // "DID asociado al origen del tráfico" (a pedido de Claro): el número +
+    // su nombre de negocio cuando existe (hoy solo Hogar tiene nombre; TyT
+    // sale sin paréntesis hasta que definan el suyo).
+    did: didInfo?.did ? (DID_LABELS[didInfo.did] ? `${didInfo.did} (${DID_LABELS[didInfo.did]})` : didInfo.did) : null,
     did_cola: didInfo?.cola ?? null,
     did_exacto: !!didHit,
     segmento,

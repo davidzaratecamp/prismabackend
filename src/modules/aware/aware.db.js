@@ -131,3 +131,14 @@ export const DID_PRIMARY_BY_PROY = {
 
 /** Número de origen que presenta la plataforma de Claro (IVR). Casi siempre este. */
 export const CLARO_IVR_NUMBER = '3143000756';
+
+/**
+ * Nombre de negocio del origen del tráfico por DID — a pedido de Claro, para
+ * el campo "DID asociado al origen del tráfico" del entregable. Solo Hogar
+ * tiene nombre por ahora (2026-09-17); TyT queda sin etiqueta hasta que lo
+ * pidan/den los nombres.
+ */
+export const DID_LABELS = {
+  '6019196235': 'Tráfico general',
+  '6019142515': 'Tráfico 3112000000',
+};
