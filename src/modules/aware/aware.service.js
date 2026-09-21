@@ -1095,13 +1095,48 @@ export function getAgentHangup(f = {}) {
 
 /* ───────────────────────── pata del asesor humano ───────────────────────── */
 
+// Nombre a mostrar por código — para UP/UN se fuerza el rename aunque Aware
+// mande su propio texto ("UTIL POSITIVO"/"UTIL NEGATIVO"); para el resto se
+// usa el texto real de Aware (tc.nomenclatura_nombre) y esto solo es respaldo.
+const TIP_RENAME = { UP: 'VENTA EXITOSA', UN: 'NO VENTA' };
 const TIP_LABEL = {
-  UP: 'ÚTIL POSITIVO', UN: 'ÚTIL NEGATIVO', VLL: 'MANIFIESTA INTERÉS',
+  UP: 'VENTA EXITOSA', UN: 'NO VENTA', VLL: 'MANIFIESTA INTERÉS',
   DME: 'VOLVER A LLAMAR', EO: 'CLIENTE OCUPADO', CFA: 'CLIENTE FALLECIDO',
   FCH: 'FUERA DEL PAÍS', FER: 'FONO NO CORRESPONDE', ABN: 'ABANDONO',
   NC: 'NO CONTESTA', ND: 'FONO NO DISPONIBLE', ERC: 'ERROR DE CONEXIÓN',
   FS: 'FUERA DE SERVICIO', GRB: 'GRABADORA', TF: 'TONO FAX', TO: 'TONO OCUPADO',
 };
+
+/** Detalle de la venta exitosa (Accesos/TV y Voz/Adicionales) — solo existe en
+ *  Aware cuando la tipificación es UP; en TyT esos label_name no existen, así
+ *  que ahí sale vacío sin necesidad de filtrar por campaña aquí. */
+async function ventaDetalleFor(proyectoIds, from, to, totalUp) {
+  const queues = humanQueues(proyectoIds);
+  if (!queues.length || !totalUp) return [];
+  const [d] = await awareQuery(
+    `SELECT
+       COUNT(*) FILTER (WHERE EXISTS (
+         SELECT 1 FROM jsonb_each(rl.json_data->'datos_contacto') dc
+         WHERE dc.value->>'label_name' = 'ACCESOS (TRIPLE, DOBLE, SENCILLO CON @)'))::int AS accesos,
+       COUNT(*) FILTER (WHERE EXISTS (
+         SELECT 1 FROM jsonb_each(rl.json_data->'datos_contacto') dc
+         WHERE dc.value->>'label_name' = 'TV Y/O VOZ'))::int AS tv_voz,
+       COUNT(*) FILTER (WHERE EXISTS (
+         SELECT 1 FROM jsonb_each(rl.json_data->'datos_contacto') dc
+         WHERE dc.value->>'label_name' = 'ADICIONALES'))::int AS adicionales
+     FROM registro_llamada rl
+     WHERE rl.proyecto_id = ANY($1::int[]) AND rl.registro_llamada_fecha BETWEEN $2 AND $3
+       AND rl.nomenclatura_id = 'UP'`,
+    [queues, from, to]
+  );
+  return [
+    { label: 'ACCESOS', calls: num(d?.accesos) },
+    { label: 'TV Y/O VOZ', calls: num(d?.tv_voz) },
+    { label: 'ADICIONALES', calls: num(d?.adicionales) },
+  ]
+    .filter((x) => x.calls > 0)
+    .map((x) => ({ ...x, rate: rate(x.calls, totalUp) }));
+}
 
 /** Embudo de negocio completo: transferencia → atendida → tipificación del asesor. */
 export function getHumanOutcomes(f = {}) {
@@ -1133,10 +1168,12 @@ export function getHumanOutcomes(f = {}) {
         if (x.cod === 'UP') up += n;
         if (x.cod === 'UN') un += n;
         if (x.efectivo === 'Contacto Efectivo') efectivas += n;
-        tip.push({ cod: x.cod, nombre: x.nombre || TIP_LABEL[x.cod] || x.cod, efectivo: x.efectivo, calls: n });
+        const nombre = TIP_RENAME[x.cod] || x.nombre || TIP_LABEL[x.cod] || x.cod;
+        tip.push({ cod: x.cod, nombre, efectivo: x.efectivo, calls: n });
       }
     }
     tip.sort((a, b) => b.calls - a.calls);
+    const venta_detalle = await ventaDetalleFor(r.proyectoIds, r.from, r.to, up);
     return {
       range: { from: r.from, to: r.to },
       transfers,
@@ -1148,6 +1185,9 @@ export function getHumanOutcomes(f = {}) {
       conversion_rate: rate(up, atendidas), // UP sobre lo atendido
       efectivo_rate: rate(efectivas, atendidas),
       tipificaciones: tip,
+      // Subconjuntos de "venta exitosa" (no suman aparte del total UP) — % es
+      // sobre util_positivo, no sobre atendidas. Vacío si no hay ninguno (TyT).
+      venta_detalle,
       approximate: true,
     };
   });

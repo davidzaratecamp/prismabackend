@@ -9,8 +9,12 @@
  * `codigo` / `nombre` / `grupo` de cada entrada (o añadir el mapeo Aware→Claro).
  */
 export const CLARO_TIP_TREE = {
-  UP: { codigo: 'UP', nombre: 'ÚTIL POSITIVO', grupo: 'Contacto Efectivo' },
-  UN: { codigo: 'UN', nombre: 'ÚTIL NEGATIVO', grupo: 'Contacto Efectivo' },
+  // A pedido del usuario (2026-09-21): "ÚTIL POSITIVO"/"ÚTIL NEGATIVO" se
+  // renombran a "VENTA EXITOSA"/"NO VENTA" en todo el panel. El código Aware
+  // (UP/UN) sigue igual internamente — es lo único que Aware entiende — pero
+  // ya no debe aparecer visible en ningún panel.
+  UP: { codigo: 'UP', nombre: 'VENTA EXITOSA', grupo: 'Contacto Efectivo' },
+  UN: { codigo: 'UN', nombre: 'NO VENTA', grupo: 'Contacto Efectivo' },
   VLL: { codigo: 'VLL', nombre: 'MANIFIESTA INTERÉS', grupo: 'Contacto No Efectivo' },
   DME: { codigo: 'DME', nombre: 'VOLVER A LLAMAR', grupo: 'Contacto No Efectivo' },
   EO: { codigo: 'EO', nombre: 'CLIENTE NO DISPONIBLE/OCUPADO', grupo: 'Contacto No Efectivo' },

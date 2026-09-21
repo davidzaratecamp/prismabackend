@@ -242,12 +242,12 @@ function mapRow(x, retellMap) {
     tipificacion_asesor_codigo: tip?.codigo ?? null,
     tipificacion_asesor_nombre: tip?.nombre ?? (x.tc_nombre || null),
     tipificacion_asesor_grupo: tip?.grupo ?? (x.tc_efectivo || null),
-    // Solo existe cuando la tipificación del asesor es UN (Útil Negativo) — el
+    // Solo existe cuando la tipificación del asesor es UN ("No venta") — el
     // motivo puntual del rechazo (soporte técnico, sin cobertura, facturación,
     // etc.). Texto libre de Aware, normalizado a mayúsculas.
     motivo_rechazo: transferido ? normMotivo(x.motivo_rechazo) : null,
-    // Detalle de la venta — solo existe cuando la tipificación es UP (Útil
-    // Positivo). Son casillas de Aware (siempre "1" cuando están marcadas,
+    // Detalle de la venta — solo existe cuando la tipificación es UP ("Venta
+    // exitosa"). Son casillas de Aware (siempre "1" cuando están marcadas,
     // vacío cuando no aplica) — se exponen como "Sí"/null, igual que `venta`.
     accesos: transferido && x.dc_accesos ? 'Sí' : null,
     tv_voz: transferido && x.dc_tv_voz ? 'Sí' : null,
