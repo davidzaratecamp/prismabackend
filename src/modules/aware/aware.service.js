@@ -9,7 +9,7 @@ import {
 } from './aware.db.js';
 import { cached } from './aware.cache.js';
 import { db } from '../../db/knex.js'; // MySQL (prisma_db) — sólo para el snapshot de VoxPro
-import { normTipIA, TIP_IA_VALUES } from './aware.tipmap.js';
+import { normTipIA, TIP_IA_VALUES, matchClaroAsesor } from './aware.tipmap.js';
 import { env } from '../../config/env.js';
 
 /* ───────────────────────── helpers ───────────────────────── */
@@ -1139,16 +1139,16 @@ async function ventaDetalleFor(proyectoIds, from, to, totalUp) {
 }
 
 /**
- * Detalle de "no venta" (motivo_rechazo_texto de Aware) — solo existe cuando
- * la tipificación es UN. Texto libre con casing/espacios inconsistentes
- * (mismo problema que el motivo_rechazo del entregable); se normaliza en SQL
- * con el mismo criterio que normMotivo() en aware.deliverable.js (colapsar
- * espacios/tabs, mayúsculas). Se agrupan los que no entran en el top en
- * "OTROS" para que la lista siempre sume el total de "no venta".
+ * Árbol oficial de "no venta" (Claro, Inbound Hogar ASESOR: NO VENTA /
+ * LLAMADA DE SERVICIO / INCONSISTENCIA, TIP-004..TIP-020 — ver
+ * aware.tipmap.js). Clasifica cada motivo_rechazo_texto real de Aware contra
+ * el árbol vía matchClaroAsesor(); lo que no matchea ningún alias conocido,
+ * o directamente no trae motivo_rechazo_texto, cae en "SIN CLASIFICAR" —
+ * así los % siempre suman ~100% del total de "no venta".
  */
-async function noVentaDetalleFor(proyectoIds, from, to, totalUn) {
+async function noVentaArbolFor(proyectoIds, from, to, totalUn) {
   const queues = humanQueues(proyectoIds);
-  if (!queues.length || !totalUn) return [];
+  if (!queues.length || !totalUn) return { categorias: [], sin_clasificar: null };
   const rows = await awareQuery(
     `SELECT trim(upper(regexp_replace(rl.json_data->>'motivo_rechazo_texto', '\\s+', ' ', 'g'))) AS motivo,
             COUNT(*)::int AS n
@@ -1156,14 +1156,47 @@ async function noVentaDetalleFor(proyectoIds, from, to, totalUn) {
      WHERE rl.proyecto_id = ANY($1::int[]) AND rl.registro_llamada_fecha BETWEEN $2 AND $3
        AND rl.nomenclatura_id = 'UN'
        AND NULLIF(TRIM(rl.json_data->>'motivo_rechazo_texto'), '') IS NOT NULL
-     GROUP BY 1 ORDER BY n DESC`,
+     GROUP BY 1`,
     [queues, from, to]
   );
-  const TOP = 12;
-  const top = rows.slice(0, TOP).map((x) => ({ label: x.motivo, calls: num(x.n) }));
-  const restCalls = rows.slice(TOP).reduce((s, x) => s + num(x.n), 0);
-  if (restCalls > 0) top.push({ label: 'OTROS', calls: restCalls });
-  return top.map((x) => ({ ...x, rate: rate(x.calls, totalUn) }));
+  const buckets = new Map(); // tip -> { tip, categoria, label, calls }
+  let clasificados = 0;
+  let sinClasificar = 0;
+  for (const row of rows) {
+    const n = num(row.n);
+    const hit = matchClaroAsesor(row.motivo);
+    if (hit && hit.categoria !== 'VENTA EXITOSA') {
+      clasificados += n;
+      const e = buckets.get(hit.tip) || { tip: hit.tip, categoria: hit.categoria, label: hit.label, calls: 0 };
+      e.calls += n;
+      buckets.set(hit.tip, e);
+    } else {
+      // Texto que no matchea ningún TIP-XXX de "no venta" conocido, o que
+      // matcheó por error uno de "venta exitosa" (dato mal cargado por el
+      // asesor en una llamada UN, pasa en la práctica).
+      sinClasificar += n;
+    }
+  }
+  // UN sin motivo_rechazo_texto en absoluto (el heurístico bot→asesor tiene
+  // un desfase de ~0.1% frente al conteo directo — se acota con max(0,·)).
+  sinClasificar += Math.max(0, totalUn - clasificados - sinClasificar);
+
+  const porCategoria = new Map();
+  for (const b of buckets.values()) {
+    const list = porCategoria.get(b.categoria) || [];
+    list.push({ tip: b.tip, label: b.label, calls: b.calls, rate: rate(b.calls, totalUn) });
+    porCategoria.set(b.categoria, list);
+  }
+  const ORDEN = ['NO VENTA', 'LLAMADA DE SERVICIO', 'INCONSISTENCIA'];
+  const categorias = ORDEN.filter((c) => porCategoria.has(c)).map((c) => ({
+    categoria: c,
+    items: porCategoria.get(c).sort((a, b) => b.calls - a.calls),
+  }));
+
+  return {
+    categorias,
+    sin_clasificar: sinClasificar > 0 ? { calls: sinClasificar, rate: rate(sinClasificar, totalUn) } : null,
+  };
 }
 
 /** Embudo de negocio completo: transferencia → atendida → tipificación del asesor. */
@@ -1201,9 +1234,14 @@ export function getHumanOutcomes(f = {}) {
       }
     }
     tip.sort((a, b) => b.calls - a.calls);
-    const [venta_detalle, no_venta_detalle] = await Promise.all([
+    // "Otros resultados": códigos de tipo_contacto que quedan FUERA del árbol
+    // oficial de Claro (FER/CFA/VLL/DME/EO/ABN/NC/ND/ERC/FS/GRB/TF/TO) — no
+    // son ni venta exitosa ni no venta, son intentos que no lograron contacto
+    // real. UP/UN ya se desglosan aparte (venta_detalle/no_venta_arbol).
+    const otros_resultados = tip.filter((t) => t.cod !== 'UP' && t.cod !== 'UN');
+    const [venta_detalle, no_venta_arbol] = await Promise.all([
       ventaDetalleFor(r.proyectoIds, r.from, r.to, up),
-      noVentaDetalleFor(r.proyectoIds, r.from, r.to, un),
+      noVentaArbolFor(r.proyectoIds, r.from, r.to, un),
     ]);
     return {
       range: { from: r.from, to: r.to },
@@ -1216,11 +1254,12 @@ export function getHumanOutcomes(f = {}) {
       conversion_rate: rate(up, atendidas), // UP sobre lo atendido
       efectivo_rate: rate(efectivas, atendidas),
       tipificaciones: tip,
+      otros_resultados,
       // Subconjuntos de "venta exitosa"/"no venta" (no suman aparte del total
       // UP/UN) — % es sobre util_positivo/util_negativo, no sobre atendidas.
-      // Vacíos si no hay datos (venta_detalle en TyT).
+      // venta_detalle vacío en TyT (esos campos no existen ahí).
       venta_detalle,
-      no_venta_detalle,
+      no_venta_arbol,
       approximate: true,
     };
   });
