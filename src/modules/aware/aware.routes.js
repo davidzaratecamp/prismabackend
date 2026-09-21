@@ -36,6 +36,7 @@ const BASIC_ALLOW = [
   /^\/config$/,
   /^\/analytics\/(filters|overview|period-comparison|funnel|volume-by-day|daily-trend|hangup|sentiment|service-types|did-breakdown|sofia-tipificacion)$/,
   /^\/deliverable(\/.*|\.csv|\.json)?$/,
+  /^\/agosto\/(resumen|calls|motivos)$/,
 ];
 router.use((req, _res, next) => {
   if (req.user?.aware_view !== 'basico') return next();
