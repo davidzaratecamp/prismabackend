@@ -6,6 +6,7 @@ import { env } from '../../config/env.js';
 import { isAwareConfigured } from './aware.db.js';
 import * as service from './aware.service.js';
 import * as deliverable from './aware.deliverable.js';
+import * as agosto from './aware.agosto.js';
 import { streamAudioAsMp3 } from './aware.audio.js';
 import { getMonitor } from './aware.monitor.js';
 
@@ -236,6 +237,38 @@ router.get(
     const src = await deliverable.audioSource(req.params.id, leg);
     if (!src) throw new HttpError(404, 'Grabación no disponible');
     streamAudioAsMp3(src, res);
+  })
+);
+
+/* ── Pestaña "Agosto" — corrección manual 2026-08, solo Claro Hogar (ver
+   aware.agosto.js). Dataset estático propio, no consulta Aware ni comparte
+   filtros de fecha con el resto del panel. TyT-scoped no ve nada (403). ── */
+function ensureHogarScope(req, _res, next) {
+  if (req.user?.aware_scope === 13) throw new HttpError(403, 'Agosto es exclusivo de Claro Hogar');
+  next();
+}
+
+router.get(
+  '/agosto/resumen',
+  ensureHogarScope,
+  asyncHandler(async (_req, res) => {
+    res.json(await agosto.getAgostoResumen());
+  })
+);
+
+router.get(
+  '/agosto/calls',
+  ensureHogarScope,
+  asyncHandler(async (req, res) => {
+    res.json(await agosto.getAgostoCalls(req.query));
+  })
+);
+
+router.get(
+  '/agosto/motivos',
+  ensureHogarScope,
+  asyncHandler(async (_req, res) => {
+    res.json(await agosto.getAgostoMotivos());
   })
 );
 
