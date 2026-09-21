@@ -1138,6 +1138,34 @@ async function ventaDetalleFor(proyectoIds, from, to, totalUp) {
     .map((x) => ({ ...x, rate: rate(x.calls, totalUp) }));
 }
 
+/**
+ * Detalle de "no venta" (motivo_rechazo_texto de Aware) — solo existe cuando
+ * la tipificación es UN. Texto libre con casing/espacios inconsistentes
+ * (mismo problema que el motivo_rechazo del entregable); se normaliza en SQL
+ * con el mismo criterio que normMotivo() en aware.deliverable.js (colapsar
+ * espacios/tabs, mayúsculas). Se agrupan los que no entran en el top en
+ * "OTROS" para que la lista siempre sume el total de "no venta".
+ */
+async function noVentaDetalleFor(proyectoIds, from, to, totalUn) {
+  const queues = humanQueues(proyectoIds);
+  if (!queues.length || !totalUn) return [];
+  const rows = await awareQuery(
+    `SELECT trim(upper(regexp_replace(rl.json_data->>'motivo_rechazo_texto', '\\s+', ' ', 'g'))) AS motivo,
+            COUNT(*)::int AS n
+     FROM registro_llamada rl
+     WHERE rl.proyecto_id = ANY($1::int[]) AND rl.registro_llamada_fecha BETWEEN $2 AND $3
+       AND rl.nomenclatura_id = 'UN'
+       AND NULLIF(TRIM(rl.json_data->>'motivo_rechazo_texto'), '') IS NOT NULL
+     GROUP BY 1 ORDER BY n DESC`,
+    [queues, from, to]
+  );
+  const TOP = 12;
+  const top = rows.slice(0, TOP).map((x) => ({ label: x.motivo, calls: num(x.n) }));
+  const restCalls = rows.slice(TOP).reduce((s, x) => s + num(x.n), 0);
+  if (restCalls > 0) top.push({ label: 'OTROS', calls: restCalls });
+  return top.map((x) => ({ ...x, rate: rate(x.calls, totalUn) }));
+}
+
 /** Embudo de negocio completo: transferencia → atendida → tipificación del asesor. */
 export function getHumanOutcomes(f = {}) {
   const r = resolveFilters(f);
@@ -1173,7 +1201,10 @@ export function getHumanOutcomes(f = {}) {
       }
     }
     tip.sort((a, b) => b.calls - a.calls);
-    const venta_detalle = await ventaDetalleFor(r.proyectoIds, r.from, r.to, up);
+    const [venta_detalle, no_venta_detalle] = await Promise.all([
+      ventaDetalleFor(r.proyectoIds, r.from, r.to, up),
+      noVentaDetalleFor(r.proyectoIds, r.from, r.to, un),
+    ]);
     return {
       range: { from: r.from, to: r.to },
       transfers,
@@ -1185,9 +1216,11 @@ export function getHumanOutcomes(f = {}) {
       conversion_rate: rate(up, atendidas), // UP sobre lo atendido
       efectivo_rate: rate(efectivas, atendidas),
       tipificaciones: tip,
-      // Subconjuntos de "venta exitosa" (no suman aparte del total UP) — % es
-      // sobre util_positivo, no sobre atendidas. Vacío si no hay ninguno (TyT).
+      // Subconjuntos de "venta exitosa"/"no venta" (no suman aparte del total
+      // UP/UN) — % es sobre util_positivo/util_negativo, no sobre atendidas.
+      // Vacíos si no hay datos (venta_detalle en TyT).
       venta_detalle,
+      no_venta_detalle,
       approximate: true,
     };
   });
