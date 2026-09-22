@@ -252,8 +252,8 @@ function ensureHogarScope(req, _res, next) {
 router.get(
   '/agosto/resumen',
   ensureHogarScope,
-  asyncHandler(async (_req, res) => {
-    res.json(await agosto.getAgostoResumen());
+  asyncHandler(async (req, res) => {
+    res.json(await agosto.getAgostoResumen(req.query));
   })
 );
 

@@ -29,14 +29,28 @@ const LINEA_LABEL = {
   '3112000000': { did: '6019142515', label: 'Tráfico 3112000000' },
 };
 
-export async function getAgostoResumen() {
-  const total = await db(TABLE).count('id as n').first();
+const YMD = /^\d{4}-\d{2}-\d{2}$/;
+const AGOSTO_MIN = '2026-08-01';
+const AGOSTO_MAX = '2026-08-31';
+
+/** Resuelve from/to a un rango válido dentro de agosto (clamp + orden). Sin
+ *  parámetros devuelve el mes completo — mismo resultado que antes de tener filtro. */
+function resolveRange(from, to) {
+  const clamp = (d) => (d < AGOSTO_MIN ? AGOSTO_MIN : d > AGOSTO_MAX ? AGOSTO_MAX : d);
+  const f = clamp(YMD.test(from || '') ? from : AGOSTO_MIN);
+  const t = clamp(YMD.test(to || '') ? to : AGOSTO_MAX);
+  return f <= t ? [f, t] : [t, f];
+}
+
+export async function getAgostoResumen(f = {}) {
+  const range = resolveRange(f.from, f.to);
+  const total = await db(TABLE).whereBetween('fecha', range).count('id as n').first();
   const totalN = num(total?.n);
   if (!totalN) {
     return { total: 0, por_tipificacion: [], por_linea: [], no_venta_arbol: { categorias: [], sin_clasificar: null } };
   }
 
-  const porTip = await db(TABLE).select('tipificacion').count('id as n').groupBy('tipificacion');
+  const porTip = await db(TABLE).whereBetween('fecha', range).select('tipificacion').count('id as n').groupBy('tipificacion');
   const por_tipificacion = porTip
     .map((x) => ({
       tipificacion: TIPIFICACION_LABEL[x.tipificacion] || x.tipificacion || 'SIN DATO',
@@ -45,7 +59,7 @@ export async function getAgostoResumen() {
     }))
     .sort((a, b) => b.calls - a.calls);
 
-  const porLinea = await db(TABLE).select('linea_entrada').count('id as n').groupBy('linea_entrada');
+  const porLinea = await db(TABLE).whereBetween('fecha', range).select('linea_entrada').count('id as n').groupBy('linea_entrada');
   const por_linea = porLinea
     .map((x) => {
       const info = LINEA_LABEL[x.linea_entrada];
@@ -60,6 +74,7 @@ export async function getAgostoResumen() {
   // Árbol de "no venta" — mismo alias map que el panel en vivo (aware.tipmap.js),
   // aplicado sobre el motivo_rechazo YA CORREGIDO del Excel.
   const noVentaRows = await db(TABLE)
+    .whereBetween('fecha', range)
     .where({ tipificacion: 'UTIL NEGATIVO' })
     .whereNotNull('motivo_rechazo')
     .select('motivo_rechazo')
@@ -111,7 +126,7 @@ export async function getAgostoCalls(f = {}) {
   const page = Math.max(1, Number(f.page) || 1);
   const pageSize = Math.min(200, Math.max(1, Number(f.pageSize) || 50));
 
-  const q = db(TABLE);
+  const q = db(TABLE).whereBetween('fecha', resolveRange(f.from, f.to));
   if (f.phone) q.where('telefono', 'like', `%${String(f.phone).replace(/[%_]/g, '')}%`);
   if (f.tipificacion === 'venta') q.where('tipificacion', 'UTIL POSITIVO');
   else if (f.tipificacion === 'no_venta') q.where('tipificacion', 'UTIL NEGATIVO');
