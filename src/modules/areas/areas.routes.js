@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { db } from '../../db/knex.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { validate } from '../../middleware/validate.js';
-import { requireAuth, requireRole, blockRestrictedCreate } from '../../middleware/auth.js';
+import { requireAuth, requireRole, blockRestrictedWrite } from '../../middleware/auth.js';
 import { notFound, badRequest } from '../../utils/httpError.js';
 
 const router = Router();
@@ -66,7 +66,7 @@ const bodySchema = z.object({
 router.post(
   '/',
   requireRole('admin'),
-  blockRestrictedCreate,
+  blockRestrictedWrite,
   validate(bodySchema),
   asyncHandler(async (req, res) => {
     const { name, color, description } = req.body;
@@ -86,6 +86,7 @@ router.post(
 router.patch(
   '/:id',
   requireRole('admin'),
+  blockRestrictedWrite,
   validate(bodySchema.partial()),
   asyncHandler(async (req, res) => {
     const area = await db('areas').where({ id: req.params.id }).first();
@@ -106,6 +107,7 @@ router.patch(
 router.delete(
   '/:id',
   requireRole('admin'),
+  blockRestrictedWrite,
   asyncHandler(async (req, res) => {
     const area = await db('areas').where({ id: req.params.id }).first();
     if (!area) throw notFound('Área no encontrada');

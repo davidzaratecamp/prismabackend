@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { db } from '../../db/knex.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { validate } from '../../middleware/validate.js';
-import { requireAuth, canWrite, blockRestrictedCreate } from '../../middleware/auth.js';
+import { requireAuth, canWrite, blockRestrictedWrite } from '../../middleware/auth.js';
 import { notFound, forbidden } from '../../utils/httpError.js';
 import { logActivity } from '../../utils/activity.js';
 import { recomputeProject } from '../../utils/progress.js';
@@ -195,7 +195,7 @@ router.put(
 router.post(
   '/',
   canWrite,
-  blockRestrictedCreate,
+  blockRestrictedWrite,
   validate(createSchema),
   asyncHandler(async (req, res) => {
     const b = req.body;
@@ -260,6 +260,7 @@ router.post(
 router.patch(
   '/:id',
   canWrite,
+  blockRestrictedWrite,
   validate(updateSchema),
   asyncHandler(async (req, res) => {
     const project = await db('projects').where({ id: req.params.id }).first();
@@ -340,6 +341,7 @@ router.patch(
 router.put(
   '/:id/areas',
   canWrite,
+  blockRestrictedWrite,
   validate(z.object({ area_ids: z.array(z.number().int().positive()).min(1) })),
   asyncHandler(async (req, res) => {
     const project = await db('projects').where({ id: req.params.id }).first();
@@ -361,6 +363,7 @@ router.put(
 router.put(
   '/:id/members',
   canWrite,
+  blockRestrictedWrite,
   validate(z.object({ member_ids: z.array(z.number().int().positive()) })),
   asyncHandler(async (req, res) => {
     const project = await db('projects').where({ id: req.params.id }).first();
@@ -383,6 +386,7 @@ router.put(
 router.put(
   '/:id/requesters',
   canWrite,
+  blockRestrictedWrite,
   validate(z.object({ requester_ids: z.array(z.number().int().positive()) })),
   asyncHandler(async (req, res) => {
     const project = await db('projects').where({ id: req.params.id }).first();
@@ -405,6 +409,7 @@ router.put(
 router.delete(
   '/:id',
   canWrite,
+  blockRestrictedWrite,
   asyncHandler(async (req, res) => {
     const project = await db('projects').where({ id: req.params.id }).first();
     if (!project) throw notFound('Proyecto no encontrado');

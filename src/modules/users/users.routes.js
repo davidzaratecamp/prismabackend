@@ -4,7 +4,7 @@ import bcrypt from 'bcryptjs';
 import { db } from '../../db/knex.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { validate } from '../../middleware/validate.js';
-import { requireAuth, requireRole, blockRestrictedCreate } from '../../middleware/auth.js';
+import { requireAuth, requireRole, blockRestrictedWrite } from '../../middleware/auth.js';
 import { notFound, badRequest } from '../../utils/httpError.js';
 import { logActivity } from '../../utils/activity.js';
 
@@ -62,7 +62,7 @@ const AWARE_SCOPED_ROLES = ['analista', 'admin'];
 router.post(
   '/',
   requireRole('admin'),
-  blockRestrictedCreate,
+  blockRestrictedWrite,
   validate(createSchema),
   asyncHandler(async (req, res) => {
     const { name, email, password, role, area_id, aware_scope, aware_quality, aware_view, admin_no_create } = req.body;
@@ -109,6 +109,7 @@ const updateSchema = z.object({
 router.patch(
   '/:id',
   requireRole('admin'),
+  blockRestrictedWrite,
   validate(updateSchema),
   asyncHandler(async (req, res) => {
     const user = await db('users').where({ id: req.params.id }).first();
@@ -149,6 +150,7 @@ router.patch(
 router.delete(
   '/:id',
   requireRole('admin'),
+  blockRestrictedWrite,
   asyncHandler(async (req, res) => {
     const user = await db('users').where({ id: req.params.id }).first();
     if (!user) throw notFound('Usuario no encontrado');

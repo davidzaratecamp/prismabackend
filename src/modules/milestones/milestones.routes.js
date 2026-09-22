@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { db } from '../../db/knex.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { validate } from '../../middleware/validate.js';
-import { requireAuth, canWrite } from '../../middleware/auth.js';
+import { requireAuth, canWrite, blockRestrictedWrite } from '../../middleware/auth.js';
 import { notFound } from '../../utils/httpError.js';
 
 const router = Router({ mergeParams: true });
@@ -28,6 +28,7 @@ router.get(
 router.post(
   '/',
   canWrite,
+  blockRestrictedWrite,
   validate(schema),
   asyncHandler(async (req, res) => {
     const project = await db('projects').where({ id: req.params.projectId }).first();
@@ -45,6 +46,7 @@ router.post(
 router.patch(
   '/:milestoneId',
   canWrite,
+  blockRestrictedWrite,
   validate(schema.partial()),
   asyncHandler(async (req, res) => {
     const m = await db('milestones').where({ id: req.params.milestoneId }).first();
@@ -57,6 +59,7 @@ router.patch(
 router.delete(
   '/:milestoneId',
   canWrite,
+  blockRestrictedWrite,
   asyncHandler(async (req, res) => {
     const deleted = await db('milestones').where({ id: req.params.milestoneId }).del();
     if (!deleted) throw notFound('Hito no encontrado');

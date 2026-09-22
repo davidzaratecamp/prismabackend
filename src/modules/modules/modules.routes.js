@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { db } from '../../db/knex.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { validate } from '../../middleware/validate.js';
-import { requireAuth, canWrite } from '../../middleware/auth.js';
+import { requireAuth, canWrite, blockRestrictedWrite } from '../../middleware/auth.js';
 import { notFound, badRequest } from '../../utils/httpError.js';
 import { logActivity } from '../../utils/activity.js';
 import { recomputeProject } from '../../utils/progress.js';
@@ -61,6 +61,7 @@ router.get(
 router.post(
   '/',
   canWrite,
+  blockRestrictedWrite,
   validate(createSchema),
   asyncHandler(async (req, res) => {
     const project = await loadProject(req.params.projectId);
@@ -97,6 +98,7 @@ router.post(
 router.patch(
   '/:moduleId',
   canWrite,
+  blockRestrictedWrite,
   validate(createSchema.partial()),
   asyncHandler(async (req, res) => {
     const mod = await db('modules').where({ id: req.params.moduleId }).first();
@@ -128,6 +130,7 @@ router.patch(
 router.delete(
   '/:moduleId',
   canWrite,
+  blockRestrictedWrite,
   asyncHandler(async (req, res) => {
     const mod = await db('modules').where({ id: req.params.moduleId }).first();
     if (!mod) throw notFound('Módulo no encontrado');

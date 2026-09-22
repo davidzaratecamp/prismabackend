@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { db } from '../../db/knex.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { validate } from '../../middleware/validate.js';
-import { requireAuth, canWrite } from '../../middleware/auth.js';
+import { requireAuth, canWrite, blockRestrictedWrite } from '../../middleware/auth.js';
 import { notFound } from '../../utils/httpError.js';
 import { logActivity } from '../../utils/activity.js';
 import { recomputeProject } from '../../utils/progress.js';
@@ -44,6 +44,7 @@ router.get(
 router.post(
   '/',
   canWrite,
+  blockRestrictedWrite,
   validate(createSchema),
   asyncHandler(async (req, res) => {
     const mod = await loadModule(req.params.moduleId);
@@ -77,6 +78,7 @@ const patchSchema = createSchema.partial();
 router.patch(
   '/:taskId',
   canWrite,
+  blockRestrictedWrite,
   validate(patchSchema),
   asyncHandler(async (req, res) => {
     const task = await db('tasks').where({ id: req.params.taskId }).first();
@@ -113,6 +115,7 @@ const moveSchema = z.object({
 router.patch(
   '/:taskId/move',
   canWrite,
+  blockRestrictedWrite,
   validate(moveSchema),
   asyncHandler(async (req, res) => {
     const task = await db('tasks').where({ id: req.params.taskId }).first();
@@ -142,6 +145,7 @@ router.patch(
 router.delete(
   '/:taskId',
   canWrite,
+  blockRestrictedWrite,
   asyncHandler(async (req, res) => {
     const task = await db('tasks').where({ id: req.params.taskId }).first();
     if (!task) throw notFound('Tarea no encontrada');
