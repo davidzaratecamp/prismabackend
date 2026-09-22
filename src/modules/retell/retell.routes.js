@@ -11,13 +11,25 @@ const router = Router();
 // Panel solo para administradores.
 router.use(requireAuth, requireRole('admin'));
 
+// Alcance por campaña — mismo `aware_scope` que el resto de Prisma (12 Hogar
+// / 13 TyT, ver aware.routes.js). Un admin con scope (caso: David Acero,
+// admin limitado a TyT) queda fijado a SU agente de Sofia sin importar qué
+// pida el query string; agentId del cliente se ignora si hay scope. IDs
+// confirmados en retell_agents 2026-09-22.
+const RETELL_AGENT_BY_SCOPE = {
+  12: 'agent_19c480e397940446b2da989813', // sofia_hogar_agent
+  13: 'agent_0ebd9b1fd48049eabb3d7af631', // sofia_tyt_agent
+};
+const scopedAgentId = (req) => RETELL_AGENT_BY_SCOPE[req.user?.aware_scope] || null;
+
 /** Extrae los filtros comunes del query string. */
 function parseFilters(req) {
   const q = req.query || {};
+  const forced = scopedAgentId(req);
   return {
     from: q.from,
     to: q.to,
-    agentId: q.agentId, // express: ?agentId=a&agentId=b -> array
+    agentId: forced ? [forced] : q.agentId, // express: ?agentId=a&agentId=b -> array
     direction: q.direction,
     callType: q.callType,
     status: q.status,
@@ -72,16 +84,21 @@ for (const [path, fn] of Object.entries(analytics)) {
 
 router.get(
   '/analytics/filters',
-  asyncHandler(async (_req, res) => {
-    res.json(await service.getFilterOptions());
+  asyncHandler(async (req, res) => {
+    const opts = await service.getFilterOptions();
+    const forced = scopedAgentId(req);
+    if (forced) opts.agents = (opts.agents || []).filter((a) => a.agent_id === forced);
+    res.json(opts);
   })
 );
 
 // ── Agentes / llamadas ──
 router.get(
   '/agents',
-  asyncHandler(async (_req, res) => {
-    res.json(await service.listAgents());
+  asyncHandler(async (req, res) => {
+    const agents = await service.listAgents();
+    const forced = scopedAgentId(req);
+    res.json(forced ? agents.filter((a) => a.agent_id === forced) : agents);
   })
 );
 
@@ -104,6 +121,8 @@ router.get(
       }
     }
     if (!row) throw new HttpError(404, 'Llamada no encontrada');
+    const forced = scopedAgentId(req);
+    if (forced && row.agent_id !== forced) throw new HttpError(404, 'Llamada no encontrada');
     res.json(row);
   })
 );

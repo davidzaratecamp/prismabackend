@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { db } from '../../db/knex.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { validate } from '../../middleware/validate.js';
-import { requireAuth, requireRole } from '../../middleware/auth.js';
+import { requireAuth, requireRole, blockRestrictedCreate } from '../../middleware/auth.js';
 import { notFound, badRequest } from '../../utils/httpError.js';
 
 const router = Router();
@@ -66,6 +66,7 @@ const bodySchema = z.object({
 router.post(
   '/',
   requireRole('admin'),
+  blockRestrictedCreate,
   validate(bodySchema),
   asyncHandler(async (req, res) => {
     const { name, color, description } = req.body;

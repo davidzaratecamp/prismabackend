@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { db } from '../../db/knex.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { validate } from '../../middleware/validate.js';
-import { requireAuth, canWrite } from '../../middleware/auth.js';
+import { requireAuth, canWrite, blockRestrictedCreate } from '../../middleware/auth.js';
 import { notFound, forbidden } from '../../utils/httpError.js';
 import { logActivity } from '../../utils/activity.js';
 import { recomputeProject } from '../../utils/progress.js';
@@ -195,6 +195,7 @@ router.put(
 router.post(
   '/',
   canWrite,
+  blockRestrictedCreate,
   validate(createSchema),
   asyncHandler(async (req, res) => {
     const b = req.body;

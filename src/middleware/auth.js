@@ -26,7 +26,7 @@ export const requireAuth = asyncHandler(async (req, _res, next) => {
 
   const user = await db('users')
     .where({ id: payload.sub, is_active: true })
-    .first('id', 'name', 'email', 'role', 'area_id', 'avatar_color', 'aware_scope', 'aware_quality', 'aware_view');
+    .first('id', 'name', 'email', 'role', 'area_id', 'avatar_color', 'aware_scope', 'aware_quality', 'aware_view', 'admin_no_create');
   if (!user) throw unauthorized('Usuario no encontrado o inactivo');
 
   req.user = user;
@@ -43,3 +43,16 @@ export const requireRole = (...roles) => (req, _res, next) => {
 
 /** Atajo: admin o developer (puede escribir trabajo). */
 export const canWrite = requireRole('admin', 'developer');
+
+/**
+ * Bloquea SOLO la creación (no edición/borrado) a un admin marcado
+ * `admin_no_create` — caso: un admin con alcance limitado a su campaña en
+ * Aware/Retell que no debe crear usuarios, proyectos ni áreas del resto de
+ * Prisma. Va después de requireRole/canWrite en esas 3 rutas de creación.
+ */
+export const blockRestrictedCreate = (req, _res, next) => {
+  if (req.user?.role === 'admin' && req.user?.admin_no_create) {
+    return next(forbidden('Tu cuenta no tiene permiso para crear este recurso'));
+  }
+  next();
+};

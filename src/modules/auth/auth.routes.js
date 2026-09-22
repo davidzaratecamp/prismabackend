@@ -32,6 +32,7 @@ const publicUser = (u) => ({
   aware_scope: u.aware_scope ?? null,
   aware_quality: !!u.aware_quality,
   aware_view: u.aware_view || 'full',
+  admin_no_create: !!u.admin_no_create,
   avatar_color: u.avatar_color,
 });
 
