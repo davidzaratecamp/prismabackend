@@ -64,7 +64,15 @@ const DELIV_LATERAL = `
            (SELECT dc.value->>'valor' FROM jsonb_each(r.json_data->'datos_contacto') dc
             WHERE dc.value->>'label_name' = 'TV Y/O VOZ' LIMIT 1) AS dc_tv_voz,
            (SELECT dc.value->>'valor' FROM jsonb_each(r.json_data->'datos_contacto') dc
-            WHERE dc.value->>'label_name' = 'ADICIONALES' LIMIT 1) AS dc_adicionales
+            WHERE dc.value->>'label_name' = 'ADICIONALES' LIMIT 1) AS dc_adicionales,
+           -- Mismo detalle pero para TyT (Terminales y Tecnología): sus 3
+           -- casillas de venta son otras, confirmado en Aware 2026-09-22.
+           (SELECT dc.value->>'valor' FROM jsonb_each(r.json_data->'datos_contacto') dc
+            WHERE dc.value->>'label_name' = 'TERMINALES' LIMIT 1) AS dc_terminales,
+           (SELECT dc.value->>'valor' FROM jsonb_each(r.json_data->'datos_contacto') dc
+            WHERE dc.value->>'label_name' = 'TECNOLOGIA' LIMIT 1) AS dc_tecnologia,
+           (SELECT dc.value->>'valor' FROM jsonb_each(r.json_data->'datos_contacto') dc
+            WHERE dc.value->>'label_name' = 'CLARO UP' LIMIT 1) AS dc_claro_up
     FROM registro_llamada r
     WHERE v.hangup_reason = 'call_transfer'
       AND r.proyecto_id = ANY(CASE WHEN v.proyecto_id = 12 THEN ARRAY[7,9] ELSE ARRAY[10,11] END)
@@ -133,7 +141,7 @@ async function runQuery(r, { estado, venta, tip, tipIa, phone, limit, offset, wi
             v.call_analysis->'custom_analysis_data'->>'CODIGO_TIPIFICACIONIA' AS tip_ia_raw,
             COALESCE(jsonb_array_length(v.transcript_object), 0)::int AS ia_turnos,
             ${withTranscript ? 'v.transcript_object,' : ''}
-            h.rid, h.h_proy, h.asesor, h.time_tmo, h.time_speaking, h.rl_audiofile, h.nom, h.rl_uniqueid, h.motivo_rechazo, h.dc_accesos, h.dc_tv_voz, h.dc_adicionales,
+            h.rid, h.h_proy, h.asesor, h.time_tmo, h.time_speaking, h.rl_audiofile, h.nom, h.rl_uniqueid, h.motivo_rechazo, h.dc_accesos, h.dc_tv_voz, h.dc_adicionales, h.dc_terminales, h.dc_tecnologia, h.dc_claro_up,
             tc.nomenclatura_nombre AS tc_nombre, tc.contacto_efectivo AS tc_efectivo,
             COUNT(*) OVER()::int AS total_rows
      FROM v_voicebot_result v
@@ -252,6 +260,11 @@ function mapRow(x, retellMap) {
     accesos: transferido && x.dc_accesos ? 'Sí' : null,
     tv_voz: transferido && x.dc_tv_voz ? 'Sí' : null,
     adicionales: transferido && x.dc_adicionales ? 'Sí' : null,
+    // Igual pero para TyT (Terminales y Tecnología) — vacío en Hogar, esas
+    // casillas no existen ahí.
+    terminales: transferido && x.dc_terminales ? 'Sí' : null,
+    tecnologia: transferido && x.dc_tecnologia ? 'Sí' : null,
+    claro_up: transferido && x.dc_claro_up ? 'Sí' : null,
     transcripcion_ia_turnos: num(x.ia_turnos),
     grabacion_ia_url: x.ia_audiofile ? `${AUDIO_BASE_URL}/${x.ia_audiofile}` : null,
     grabacion_asesor_url:
@@ -316,7 +329,7 @@ export async function getDeliverableCall(callId) {
             v.call_analysis->'custom_analysis_data'->>'CODIGO_TIPIFICACIONIA' AS tip_ia_raw,
             COALESCE(jsonb_array_length(v.transcript_object), 0)::int AS ia_turnos,
             v.transcript_object, v.call_analysis, v.telefono,
-            h.rid, h.h_proy, h.asesor, h.time_tmo, h.time_speaking, h.rl_audiofile, h.nom, h.rl_uniqueid, h.motivo_rechazo, h.dc_accesos, h.dc_tv_voz, h.dc_adicionales,
+            h.rid, h.h_proy, h.asesor, h.time_tmo, h.time_speaking, h.rl_audiofile, h.nom, h.rl_uniqueid, h.motivo_rechazo, h.dc_accesos, h.dc_tv_voz, h.dc_adicionales, h.dc_terminales, h.dc_tecnologia, h.dc_claro_up,
             tc.nomenclatura_nombre AS tc_nombre, tc.contacto_efectivo AS tc_efectivo
      FROM v_voicebot_result v
      ${DELIV_LATERAL}
@@ -376,6 +389,9 @@ const CSV_COLS = [
   ['accesos', (x) => x.accesos],
   ['tv_voz', (x) => x.tv_voz],
   ['adicionales', (x) => x.adicionales],
+  ['terminales', (x) => x.terminales],
+  ['tecnologia', (x) => x.tecnologia],
+  ['claro_up', (x) => x.claro_up],
   ['tipo_servicio', (x) => x.tipo_servicio],
   ['transcripcion_ia', (x) => x.transcripcion_ia_texto],
   ['grabacion_ia_url', (x) => x.grabacion_ia_url],
