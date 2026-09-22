@@ -143,3 +143,64 @@ export function matchClaroAsesor(raw) {
   const code = ASESOR_ALIASES[canon(raw)];
   return code ? ASESOR_TREE_BY_CODE[code] : null;
 }
+
+/* ─────────── Árbol oficial de tipificación del asesor — Claro TyT (Terminales
+ * y Tecnología), imagen aparte confirmada por el usuario 2026-09-22. Mismo
+ * mecanismo que Hogar (ver arriba) pero es un árbol MÁS CHICO y distinto: 14
+ * códigos TIP-001..TIP-014, y "LLAMADA DE SERVICIO" tiene un solo código
+ * (SAC) en vez de los 5 de Hogar. TIP-001/002/003 salen de datos_contacto
+ * (label_name TERMINALES/TECNOLOGIA/CLARO UP, confirmado en Aware) cuando
+ * nomenclatura_id='UP'. TIP-004..014 salen de motivo_rechazo_texto cuando
+ * nomenclatura_id='UN'.
+ *
+ * A diferencia de Hogar, el texto real de Aware para TyT (90 días, 15.974 UN)
+ * tiene un tramo importante (~40%) que NO tiene un código claro en esta
+ * imagen: "FACTURACION", "COMPRA", "ENTREGA / SEGUIMIENTO", "OTRO",
+ * "NO ES CLIENTE CLARO", "SOPORTE TECNICO-HOGAR/MOVIL", "CANCELACION",
+ * "DOCUMENTO BLOQUEADO", etc. — no se adivinan: quedan en "SIN CLASIFICAR"
+ * (ver noVentaArbolFor en aware.service.js) hasta que el usuario confirme
+ * a qué TIP-XXX corresponde cada uno. */
+export const CLARO_ASESOR_TREE_TYT = [
+  { tip: 'TIP-001', categoria: 'VENTA EXITOSA', label: 'Terminales' },
+  { tip: 'TIP-002', categoria: 'VENTA EXITOSA', label: 'Tecnología' },
+  { tip: 'TIP-003', categoria: 'VENTA EXITOSA', label: 'Claro Up' },
+  { tip: 'TIP-004', categoria: 'NO VENTA', label: 'Mejor oferta comercial (identificar operador, precio y beneficios ofrecidos)' },
+  { tip: 'TIP-005', categoria: 'NO VENTA', label: 'Sin inventario' },
+  { tip: 'TIP-006', categoria: 'NO VENTA', label: 'Cliente sin cupo' },
+  { tip: 'TIP-007', categoria: 'NO VENTA', label: 'Cliente en mora' },
+  { tip: 'TIP-008', categoria: 'NO VENTA', label: 'Cliente no aprueba política de validación de identidad' },
+  { tip: 'TIP-009', categoria: 'NO VENTA', label: 'Cliente desea iPhone financiado' },
+  { tip: 'TIP-010', categoria: 'NO VENTA', label: 'Sin cobertura de entrega' },
+  { tip: 'TIP-011', categoria: 'NO VENTA', label: 'Volver a llamar' },
+  { tip: 'TIP-012', categoria: 'LLAMADA DE SERVICIO', label: 'SAC' },
+  { tip: 'TIP-013', categoria: 'INCONSISTENCIA', label: 'Transferencia fallida' },
+  { tip: 'TIP-014', categoria: 'INCONSISTENCIA', label: 'Desconexión llamada' },
+];
+
+const ASESOR_TREE_TYT_BY_CODE = Object.fromEntries(CLARO_ASESOR_TREE_TYT.map((t) => [t.tip, t]));
+
+// Solo lo que calza con confianza (texto real de Aware, 90 días, TyT). El
+// resto (FACTURACION, COMPRA, ENTREGA/SEGUIMIENTO, OTRO, NO ES CLIENTE CLARO,
+// SOPORTE TECNICO-HOGAR/MOVIL, SOPORTES/FALLAS, CANCELACION, DOCUMENTO
+// BLOQUEADO...) no tiene código claro en la imagen — queda en SIN CLASIFICAR
+// a propósito en vez de adivinar.
+const ASESOR_ALIASES_TYT = {
+  CLIENTESINCUPO: 'TIP-006',
+  CLIENTEDESEAIPHONE: 'TIP-009',
+  VOLVERALLAMAR: 'TIP-011',
+  CLIENTEENMORA: 'TIP-007',
+  MEJOROFERTACOMERCIALIDENTIFICAROPERADORPRECIOYBENEFICIOSOFRECIDOS: 'TIP-004',
+  SININVENTARIO: 'TIP-005',
+  TRANSFERENCIAFALLIDA: 'TIP-013',
+  CLIENTENOAPRUEBAPOLITICADEVALIDACIONDEIDENTIDAD: 'TIP-008',
+  SINCOBERTURADEENTREGA: 'TIP-010',
+  LLAMADACORTADA: 'TIP-014',
+  LLAMADAMUDASILENCIOSA: 'TIP-014',
+  SACGENERAL: 'TIP-012',
+};
+
+/** Mapea un motivo_rechazo_texto libre (TyT) al TIP-XXX oficial, o null si no encaja. */
+export function matchClaroAsesorTyt(raw) {
+  const code = ASESOR_ALIASES_TYT[canon(raw)];
+  return code ? ASESOR_TREE_TYT_BY_CODE[code] : null;
+}
