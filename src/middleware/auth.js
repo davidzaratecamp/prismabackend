@@ -26,7 +26,7 @@ export const requireAuth = asyncHandler(async (req, _res, next) => {
 
   const user = await db('users')
     .where({ id: payload.sub, is_active: true })
-    .first('id', 'name', 'email', 'role', 'area_id', 'avatar_color', 'aware_scope', 'aware_quality', 'aware_view', 'admin_no_create');
+    .first('id', 'name', 'email', 'role', 'area_id', 'avatar_color', 'aware_scope', 'aware_quality', 'aware_view', 'admin_no_create', 'retell_scope');
   if (!user) throw unauthorized('Usuario no encontrado o inactivo');
 
   req.user = user;

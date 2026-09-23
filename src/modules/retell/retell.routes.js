@@ -11,16 +11,16 @@ const router = Router();
 // Panel solo para administradores.
 router.use(requireAuth, requireRole('admin'));
 
-// Alcance por campaña — mismo `aware_scope` que el resto de Prisma (12 Hogar
-// / 13 TyT, ver aware.routes.js). Un admin con scope (caso: David Acero,
-// admin limitado a TyT) queda fijado a SU agente de Sofia sin importar qué
-// pida el query string; agentId del cliente se ignora si hay scope. IDs
+// Alcance por campaña — propio de Retell (`retell_scope`), independiente del
+// `aware_scope` de Aware: un admin puede estar fijado a TyT en Aware pero ver
+// ambos agentes en Retell (caso: David Acero, 2026-09-23). 12=Hogar,
+// 13=TyT, NULL=ambos. Si hay scope, el agentId del cliente se ignora. IDs
 // confirmados en retell_agents 2026-09-22.
 const RETELL_AGENT_BY_SCOPE = {
   12: 'agent_19c480e397940446b2da989813', // sofia_hogar_agent
   13: 'agent_0ebd9b1fd48049eabb3d7af631', // sofia_tyt_agent
 };
-const scopedAgentId = (req) => RETELL_AGENT_BY_SCOPE[req.user?.aware_scope] || null;
+const scopedAgentId = (req) => RETELL_AGENT_BY_SCOPE[req.user?.retell_scope] || null;
 
 /** Extrae los filtros comunes del query string. */
 function parseFilters(req) {
