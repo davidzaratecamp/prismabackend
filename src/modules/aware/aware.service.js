@@ -1113,8 +1113,9 @@ const TIP_LABEL = {
  * Mismo query que el desglose de getHumanOutcomes, pero SIN calcular
  * venta_detalle/no_venta_arbol (ese trabajo extra no hace falta aquí).
  * Solo existe para llamadas transferidas; lo que se transfirió pero no
- * matcheó ningún tramo de asesor (heurístico bot→asesor, ver HUMAN_MATCH_TIP)
- * cae en "Sin tipificar (no atendida)".
+ * matcheó ningún tramo de asesor (heurístico bot→asesor, ver HUMAN_MATCH_TIP
+ * — abandono en cola o hueco del heurístico) NO es una tipificación del
+ * asesor, así que va aparte en `sin_tipificar`, no dentro de `rows`.
  */
 export function getAsesorTipificacion(f = {}) {
   const r = resolveFilters(f);
@@ -1143,10 +1144,10 @@ export function getAsesorTipificacion(f = {}) {
       const nombre = TIP_RENAME[x.cod] || x.nombre || TIP_LABEL[x.cod] || x.cod;
       out.push({ tipificacion: nombre, calls: n });
     }
-    if (sinTipificar) out.push({ tipificacion: 'Sin tipificar (no atendida)', calls: sinTipificar });
     return {
       total,
       rows: out.sort((a, b) => b.calls - a.calls).map((x) => ({ ...x, rate: rate(x.calls, total) })),
+      sin_tipificar: sinTipificar > 0 ? { calls: sinTipificar, rate: rate(sinTipificar, total) } : null,
     };
   });
 }
