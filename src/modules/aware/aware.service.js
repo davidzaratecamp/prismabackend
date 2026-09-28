@@ -1107,6 +1107,50 @@ const TIP_LABEL = {
   FS: 'FUERA DE SERVICIO', GRB: 'GRABADORA', TF: 'TONO FAX', TO: 'TONO OCUPADO',
 };
 
+/**
+ * Tipificación del asesor humano (árbol tipo_contacto) — para la tarjeta
+ * "Tipificación asesor" del Resumen, al lado de "Tipificación IA de SOFIA".
+ * Mismo query que el desglose de getHumanOutcomes, pero SIN calcular
+ * venta_detalle/no_venta_arbol (ese trabajo extra no hace falta aquí).
+ * Solo existe para llamadas transferidas; lo que se transfirió pero no
+ * matcheó ningún tramo de asesor (heurístico bot→asesor, ver HUMAN_MATCH_TIP)
+ * cae en "Sin tipificar (no atendida)".
+ */
+export function getAsesorTipificacion(f = {}) {
+  const r = resolveFilters(f);
+  return cached(key('asesor-tipificacion', r), 60000, async () => {
+    const rows = await awareQuery(
+      `SELECT tc.nomenclatura_id AS cod,
+              tc.nomenclatura_nombre AS nombre,
+              COUNT(*)::int AS n
+       FROM v_voicebot_result v ${HUMAN_MATCH_TIP}
+       LEFT JOIN tipo_contacto tc ON tc.nomenclatura_id = h.nom
+       WHERE v.proyecto_id = ANY($1::int[]) AND v.fecha BETWEEN $2 AND $3
+         AND v.hangup_reason = 'call_transfer'
+       GROUP BY 1, 2`,
+      baseParams(r)
+    );
+    let total = 0;
+    let sinTipificar = 0;
+    const out = [];
+    for (const x of rows) {
+      const n = num(x.n);
+      total += n;
+      if (!x.cod) {
+        sinTipificar += n;
+        continue;
+      }
+      const nombre = TIP_RENAME[x.cod] || x.nombre || TIP_LABEL[x.cod] || x.cod;
+      out.push({ tipificacion: nombre, calls: n });
+    }
+    if (sinTipificar) out.push({ tipificacion: 'Sin tipificar (no atendida)', calls: sinTipificar });
+    return {
+      total,
+      rows: out.sort((a, b) => b.calls - a.calls).map((x) => ({ ...x, rate: rate(x.calls, total) })),
+    };
+  });
+}
+
 /** Detalle de la venta exitosa — Hogar (Accesos/TV y Voz/Adicionales) y TyT
  *  (Terminales/Tecnología/Claro Up) en una sola consulta: cada label_name
  *  solo existe en su campaña, así que el que no aplica sale en 0 y se filtra

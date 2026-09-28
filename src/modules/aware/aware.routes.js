@@ -34,7 +34,7 @@ router.use(requireAuth, requireRole('analista', 'admin'));
 // Resumen y Consolidado. El resto responde 403 aunque se llame directo a la API.
 const BASIC_ALLOW = [
   /^\/config$/,
-  /^\/analytics\/(filters|overview|period-comparison|funnel|volume-by-day|daily-trend|hangup|sentiment|service-types|did-breakdown|sofia-tipificacion)$/,
+  /^\/analytics\/(filters|overview|period-comparison|funnel|volume-by-day|daily-trend|hangup|sentiment|service-types|did-breakdown|sofia-tipificacion|asesor-tipificacion)$/,
   /^\/deliverable(\/.*|\.csv|\.json)?$/,
   /^\/agosto\/(resumen|calls|motivos)$/,
 ];
@@ -100,6 +100,7 @@ const analytics = {
   'by-project': service.getByProject,
   'did-breakdown': service.getDidBreakdown,
   'sofia-tipificacion': service.getSofiaTipificacion,
+  'asesor-tipificacion': service.getAsesorTipificacion,
   'transfers-attended': service.getTransfersAttended,
   // recorrido / embudo
   funnel: service.getFunnel,
