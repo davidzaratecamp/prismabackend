@@ -357,7 +357,11 @@ export async function audioSource(callId, leg) {
 
 /* ───────────────────────── exportación (CSV / JSON) ───────────────────────── */
 
-const MAX_EXPORT = 20000;
+// Sin tope de filas (a pedido del usuario 2026-09-28: Hogar y TyT ya superan
+// las 20.000 llamadas/mes cada uno, así que un tope fijo dejaba datos afuera
+// del "consolidado" que ve Claro). Se pagina en chunks de 1000 y se transmite
+// directo a la respuesta (sin acumular en memoria), así que el único costo
+// de quitar el tope es cuánto tarda la descarga en rangos muy grandes.
 const CHUNK = 1000;
 
 const CSV_COLS = [
@@ -411,7 +415,7 @@ function csvCell(v) {
   return /[";\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-/** Escribe el entregable completo (hasta MAX_EXPORT filas) directo en la respuesta. */
+/** Escribe el entregable completo (todas las filas del rango) directo en la respuesta. */
 export async function streamDeliverable(f, format, res) {
   const r = resolveFilters(f);
   const nf = normFilters(f);
@@ -429,10 +433,10 @@ export async function streamDeliverable(f, format, res) {
 
   let offset = 0;
   let first = true;
-  while (offset < MAX_EXPORT) {
+  for (;;) {
     const { rows } = await runQuery(r, {
       ...nf,
-      limit: Math.min(CHUNK, MAX_EXPORT - offset),
+      limit: CHUNK,
       offset,
       withTranscript: true,
     });
