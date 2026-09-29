@@ -26,6 +26,7 @@ import {
   DID_LABELS,
   SEGMENT_BY_PROY,
   CLARO_IVR_NUMBER,
+  DID_BY_CDR_CALL_ID,
 } from './aware.db.js';
 import { cached } from './aware.cache.js';
 import { db } from '../../db/knex.js'; // MySQL — sólo para el DID (retell_calls)
@@ -83,7 +84,19 @@ const DELIV_LATERAL = `
     ORDER BY r.registro_llamada_hora
     LIMIT 1
   ) h ON true
-  LEFT JOIN tipo_contacto tc ON tc.nomenclatura_id = h.nom`;
+  LEFT JOIN tipo_contacto tc ON tc.nomenclatura_id = h.nom
+  -- DID real por llamada (Hogar, ~99% de cobertura, se transfiera o no —
+  -- ver HOGAR_CDR_DIDS/DID_BY_CDR_CALL_ID en aware.db.js, 2026-09-29).
+  LEFT JOIN LATERAL (
+    SELECT cc.call_id AS did_raw
+    FROM cdr_custom cc
+    WHERE v.proyecto_id = 12
+      AND cc.telefono = v.telefono
+      AND cc.fecha = v.fecha
+      AND cc.call_id = ANY(ARRAY['011576019196235','011576019142515'])
+    ORDER BY ABS(EXTRACT(EPOCH FROM (cc.hora - v.hora)))
+    LIMIT 1
+  ) cdr ON true`;
 
 const ESTADOS = ['transferido', 'abandonado', 'ia'];
 const VENTAS = ['si', 'no'];
@@ -141,7 +154,7 @@ async function runQuery(r, { estado, venta, tip, tipIa, phone, limit, offset, wi
             v.call_analysis->'custom_analysis_data'->>'CODIGO_TIPIFICACIONIA' AS tip_ia_raw,
             COALESCE(jsonb_array_length(v.transcript_object), 0)::int AS ia_turnos,
             ${withTranscript ? 'v.transcript_object,' : ''}
-            h.rid, h.h_proy, h.asesor, h.time_tmo, h.time_speaking, h.rl_audiofile, h.nom, h.rl_uniqueid, h.motivo_rechazo, h.dc_accesos, h.dc_tv_voz, h.dc_adicionales, h.dc_terminales, h.dc_tecnologia, h.dc_claro_up,
+            h.rid, h.h_proy, h.asesor, h.time_tmo, h.time_speaking, h.rl_audiofile, h.nom, h.rl_uniqueid, h.motivo_rechazo, h.dc_accesos, h.dc_tv_voz, h.dc_adicionales, h.dc_terminales, h.dc_tecnologia, h.dc_claro_up, cdr.did_raw,
             tc.nomenclatura_nombre AS tc_nombre, tc.contacto_efectivo AS tc_efectivo,
             COUNT(*) OVER()::int AS total_rows
      FROM v_voicebot_result v
@@ -208,9 +221,12 @@ function mapRow(x, retellMap) {
   const durTotal = (durIa || 0) + (durAsesor || 0);
 
   const ret = retellMap.get(x.call_id);
-  // DID real (número marcado): exacto por la cola humana si hubo transferencia;
-  // si no, el DID principal de la campaña (no se puede saber si entró por la línea 1 o la 2).
-  const didHit = x.h_proy != null ? DID_BY_QUEUE[x.h_proy] : null;
+  // DID real (número marcado): en Hogar, exacto vía cdr_custom para casi
+  // toda llamada (se transfiera o no, ver aware.db.js); si no matcheó ahí,
+  // exacto por la cola humana si hubo transferencia; si tampoco, el DID
+  // principal de la campaña (no se puede saber por cuál línea entró).
+  const cdrHit = x.did_raw ? DID_BY_CDR_CALL_ID[x.did_raw] : null;
+  const didHit = cdrHit || (x.h_proy != null ? DID_BY_QUEUE[x.h_proy] : null);
   const didInfo = didHit || DID_PRIMARY_BY_PROY[x.proyecto_id] || null;
   const segmento = SEGMENT_BY_PROY[x.proyecto_id]?.segmento || null;
 
@@ -329,7 +345,7 @@ export async function getDeliverableCall(callId) {
             v.call_analysis->'custom_analysis_data'->>'CODIGO_TIPIFICACIONIA' AS tip_ia_raw,
             COALESCE(jsonb_array_length(v.transcript_object), 0)::int AS ia_turnos,
             v.transcript_object, v.call_analysis, v.telefono,
-            h.rid, h.h_proy, h.asesor, h.time_tmo, h.time_speaking, h.rl_audiofile, h.nom, h.rl_uniqueid, h.motivo_rechazo, h.dc_accesos, h.dc_tv_voz, h.dc_adicionales, h.dc_terminales, h.dc_tecnologia, h.dc_claro_up,
+            h.rid, h.h_proy, h.asesor, h.time_tmo, h.time_speaking, h.rl_audiofile, h.nom, h.rl_uniqueid, h.motivo_rechazo, h.dc_accesos, h.dc_tv_voz, h.dc_adicionales, h.dc_terminales, h.dc_tecnologia, h.dc_claro_up, cdr.did_raw,
             tc.nomenclatura_nombre AS tc_nombre, tc.contacto_efectivo AS tc_efectivo
      FROM v_voicebot_result v
      ${DELIV_LATERAL}

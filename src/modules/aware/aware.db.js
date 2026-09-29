@@ -142,3 +142,22 @@ export const DID_LABELS = {
   '6019196235': 'Tráfico general',
   '6019142515': 'Tráfico 3112000000',
 };
+
+/**
+ * DID real por llamada — Hogar, vía `cdr_custom` (2026-09-29: Aware nos dio
+ * acceso a esta tabla a pedido nuestro, tras confirmar que el DID_BY_QUEUE de
+ * arriba solo identifica la línea cuando la llamada se transfirió a un
+ * asesor). `cdr_custom.call_id` trae el DID completo con prefijo "01157"
+ * (ej. '011576019196235' = 6019196235) en CUALQUIER llamada — se transfiera
+ * o no — así que cubre el ~99% de las llamadas de Hogar, no solo las
+ * transferidas. Se empareja por teléfono + fecha, tomando la fila de
+ * `cdr_custom` con la hora más cercana a la de la llamada (ver
+ * getDidBreakdown en aware.service.js y DELIV_LATERAL en
+ * aware.deliverable.js). Solo Hogar por ahora — TyT no se ha verificado ni
+ * pedido.
+ */
+export const HOGAR_CDR_DIDS = ['011576019196235', '011576019142515'];
+export const DID_BY_CDR_CALL_ID = {
+  '011576019196235': { did: '6019196235', cola: 'Inb Hogar IA' },
+  '011576019142515': { did: '6019142515', cola: 'Inb Hogar IA 2' },
+};

@@ -6,6 +6,8 @@ import {
   AUDIO_BASE_URL,
   DID_BY_QUEUE,
   DID_PRIMARY_BY_PROY,
+  HOGAR_CDR_DIDS,
+  DID_BY_CDR_CALL_ID,
 } from './aware.db.js';
 import { cached } from './aware.cache.js';
 import { db } from '../../db/knex.js'; // MySQL (prisma_db) — sólo para el snapshot de VoxPro
@@ -447,27 +449,47 @@ const HUMAN_MATCH_QUEUE = `
   ) h ON true`;
 
 /**
- * Llamadas y transferencias por DID (línea marcada por Claro), mismo criterio
- * que el campo 8 del entregable: exacto si hubo transferencia atendida por
- * una cola humana concreta (7/9 Hogar, 10/11 TyT); si no, cae al DID
- * principal de la campaña (no se puede saber si entró por la línea 1 o la 2).
+ * Llamadas y transferencias por DID (línea marcada por Claro).
+ *
+ * Hogar: DID exacto para prácticamente TODAS las llamadas (se transfieran o
+ * no), vía `cdr_custom` (ver DID_BY_CDR_CALL_ID en aware.db.js) — emparejado
+ * por teléfono + fecha, tomando la fila con la hora más cercana a la de la
+ * llamada. Cubre ~99% (verificado 2026-09-29); el resto (sin match en
+ * cdr_custom) cae al heurístico viejo de cola humana como respaldo.
+ *
+ * TyT: sigue con el heurístico viejo — exacto solo si hubo transferencia
+ * atendida por una cola humana concreta (10/11); si no, cae al DID principal
+ * de la campaña. No se ha verificado cdr_custom para TyT todavía.
  */
 export function getDidBreakdown(f = {}) {
   const r = resolveFilters(f);
   return cached(key('did-breakdown', r), 60000, async () => {
     const rows = await awareQuery(
-      `SELECT v.proyecto_id, v.hangup_reason, h.h_proy, COUNT(*)::int AS calls
+      `SELECT v.proyecto_id, v.hangup_reason, h.h_proy, cdr.did_raw, COUNT(*)::int AS calls
        FROM v_voicebot_result v
        ${HUMAN_MATCH_QUEUE}
+       LEFT JOIN LATERAL (
+         SELECT cc.call_id AS did_raw
+         FROM cdr_custom cc
+         WHERE v.proyecto_id = 12
+           AND cc.telefono = v.telefono
+           AND cc.fecha = v.fecha
+           AND cc.call_id = ANY($4::text[])
+         ORDER BY ABS(EXTRACT(EPOCH FROM (cc.hora - v.hora)))
+         LIMIT 1
+       ) cdr ON true
        WHERE ${BASE_WHERE}
-       GROUP BY v.proyecto_id, v.hangup_reason, h.h_proy`,
-      baseParams(r)
+       GROUP BY v.proyecto_id, v.hangup_reason, h.h_proy, cdr.did_raw`,
+      [...baseParams(r), HOGAR_CDR_DIDS]
     );
     const buckets = new Map(); // did -> { did, cola, calls, transfers }
+    let exactos = 0;
     for (const x of rows) {
-      const didHit = x.h_proy != null ? DID_BY_QUEUE[x.h_proy] : null;
+      const cdrHit = x.did_raw ? DID_BY_CDR_CALL_ID[x.did_raw] : null;
+      const didHit = cdrHit || (x.h_proy != null ? DID_BY_QUEUE[x.h_proy] : null);
       const didInfo = didHit || DID_PRIMARY_BY_PROY[x.proyecto_id];
       if (!didInfo) continue;
+      if (didHit) exactos += num(x.calls);
       const e = buckets.get(didInfo.did) || { did: didInfo.did, cola: didInfo.cola, calls: 0, transfers: 0 };
       e.calls += num(x.calls);
       if (x.hangup_reason === 'call_transfer') e.transfers += num(x.calls);
@@ -485,15 +507,11 @@ export function getDidBreakdown(f = {}) {
           calls: e.calls,
           transfers: e.transfers,
           call_share: rate(e.calls, total),
-          // Ojo: NO es la tasa de transferencia propia de la línea (esa da
-          // siempre 100% en la secundaria, por construcción del heurístico —
-          // solo se identifica una llamada de la línea 2 cuando SÍ se
-          // transfirió). Es la porción de las transferencias totales que
-          // vino por cada línea — esta sí suma 100% entre todas las líneas.
           transfer_share: rate(e.transfers, totalTransfers),
         })),
-      approximate: true,
-      note: 'DID exacto solo si la llamada se transfirió y se emparejó con la cola humana; el resto cae al DID principal de la campaña.',
+      approximate: exactos < total,
+      exact_rate: rate(exactos, total),
+      note: 'Hogar: DID exacto vía cdr_custom para casi todas las llamadas (transferidas o no). TyT: exacto solo si hubo transferencia atendida por una cola humana; el resto cae al DID principal de la campaña.',
     };
   });
 }
