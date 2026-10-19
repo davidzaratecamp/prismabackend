@@ -71,10 +71,35 @@ async function rotateCredential() {
   console.warn(`[aware] password rechazada, probando candidata #${candidateIdx + 1}/${CANDIDATE_PASSWORDS.length}`);
 }
 
+// `statement_timeout` (arriba) es del lado de Postgres: si el servidor sigue
+// vivo, cancela la consulta y el cliente recibe un error. Pero si la conexión
+// TCP se cuelga en silencio (visto en producción 2026-10-19: el backfill del
+// espejo quedó 8+ minutos sin avanzar ni una fila, sin ningún error), el
+// cliente nunca se entera y el await se queda esperando para siempre. Este
+// timeout del lado de node fuerza una salida igual, y además descarta el pool
+// entero (no solo rechaza la promesa) para no dejar una conexión zombie
+// ocupando uno de los 4 slots del pool y terminar ahogando también al panel
+// en vivo.
+const CLIENT_QUERY_TIMEOUT_MS = 25000;
+
+function withClientTimeout(promise, ms) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      console.error(`[aware] consulta sin respuesta tras ${ms}ms — descartando el pool (posible conexión colgada)`);
+      const stale = pool;
+      pool = null;
+      if (stale) stale.end().catch(() => {});
+      reject(new Error(`consulta a Aware sin respuesta tras ${ms}ms`));
+    }, ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 /** Ejecuta un SELECT parametrizado contra Aware. Reintenta con otra contraseña si falló la actual. */
 export async function awareQuery(sql, params = [], _attempt = 0) {
   try {
-    const res = await getPool().query(sql, params);
+    const res = await withClientTimeout(getPool().query(sql, params), CLIENT_QUERY_TIMEOUT_MS);
     return res.rows;
   } catch (err) {
     if (isAuthError(err) && _attempt < CANDIDATE_PASSWORDS.length - 1) {
