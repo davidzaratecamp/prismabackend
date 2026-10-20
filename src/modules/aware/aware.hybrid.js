@@ -26,7 +26,24 @@ import {
   DID_PRIMARY_BY_PROY,
 } from './aware.db.js';
 import { db } from '../../db/knex.js';
+import { cached } from './aware.cache.js';
 import { normTipIA, TIP_IA_VALUES, matchClaroAsesor, matchClaroAsesorTyt } from './aware.tipmap.js';
+
+/**
+ * Las ~11 llamadas del Resumen (y las del entregable) piden, cada una por su
+ * lado, el MISMO rango de v_voicebot_result/registro_llamada/cdr_custom — al
+ * abrir una pestaña con "últimos 30 días" eso son ~15-20 consultas repetidas
+ * a la vez, varias pegándole a Aware por el tramo de hoy, compitiendo por el
+ * pool de solo 4 conexiones (ver aware.db.js) — reportado por el usuario
+ * 2026-10-20 como pestañas que "se demoran horrible". Un TTL cortito acá
+ * (no en el resultado final de cada endpoint, que ya tiene su propia caché
+ * más larga) hace que esas llamadas hermanas reusen el mismo fetch en vez de
+ * repetirlo cada una.
+ */
+const FETCH_TTL_MS = 20000;
+function fetchKey(name, ...parts) {
+  return `rowfetch:${name}:${parts.map((p) => (Array.isArray(p) ? [...p].sort().join(',') : p)).join('|')}`;
+}
 
 export function todayBogota() {
   return new Date(Date.now() - 5 * 3600000).toISOString().slice(0, 10);
@@ -104,12 +121,14 @@ async function fetchVoicebotMirror(proyectoIds, from, to) {
  * fila sin importar el origen.
  */
 export async function fetchVoicebotRows(proyectoIds, from, to) {
-  const { hist, live } = splitRange(from, to);
-  const [histRows, liveRows] = await Promise.all([
-    hist ? fetchVoicebotMirror(proyectoIds, hist.from, hist.to) : Promise.resolve([]),
-    live ? fetchVoicebotLive(proyectoIds, live.from, live.to) : Promise.resolve([]),
-  ]);
-  return histRows.concat(liveRows);
+  return cached(fetchKey('voicebot', proyectoIds, from, to), FETCH_TTL_MS, async () => {
+    const { hist, live } = splitRange(from, to);
+    const [histRows, liveRows] = await Promise.all([
+      hist ? fetchVoicebotMirror(proyectoIds, hist.from, hist.to) : Promise.resolve([]),
+      live ? fetchVoicebotLive(proyectoIds, live.from, live.to) : Promise.resolve([]),
+    ]);
+    return histRows.concat(liveRows);
+  });
 }
 
 /** Equivalente JS de PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY x) de Postgres
@@ -502,12 +521,14 @@ async function fetchRegistroMirror(queueIds, from, to) {
  * NEGATIVO, time_speaking=0 pero time_tmo=93 — reportado 2026-09-15).
  */
 export async function fetchRegistroRows(queueIds, from, to) {
-  const { hist, live } = splitRange(from, to);
-  const [histRows, liveRows] = await Promise.all([
-    hist ? fetchRegistroMirror(queueIds, hist.from, hist.to) : Promise.resolve([]),
-    live ? fetchRegistroLive(queueIds, live.from, live.to) : Promise.resolve([]),
-  ]);
-  return histRows.concat(liveRows);
+  return cached(fetchKey('registro', queueIds, from, to), FETCH_TTL_MS, async () => {
+    const { hist, live } = splitRange(from, to);
+    const [histRows, liveRows] = await Promise.all([
+      hist ? fetchRegistroMirror(queueIds, hist.from, hist.to) : Promise.resolve([]),
+      live ? fetchRegistroLive(queueIds, live.from, live.to) : Promise.resolve([]),
+    ]);
+    return histRows.concat(liveRows);
+  });
 }
 
 /**
@@ -681,12 +702,14 @@ async function fetchCdrMirror(from, to) {
 
 /** Filas crudas de cdr_custom (Hogar) para el rango, Aware (hoy) + espejo (resto). */
 export async function fetchCdrRows(from, to) {
-  const { hist, live } = splitRange(from, to);
-  const [histRows, liveRows] = await Promise.all([
-    hist ? fetchCdrMirror(hist.from, hist.to) : Promise.resolve([]),
-    live ? fetchCdrLive(live.from, live.to) : Promise.resolve([]),
-  ]);
-  return histRows.concat(liveRows);
+  return cached(fetchKey('cdr', from, to), FETCH_TTL_MS, async () => {
+    const { hist, live } = splitRange(from, to);
+    const [histRows, liveRows] = await Promise.all([
+      hist ? fetchCdrMirror(hist.from, hist.to) : Promise.resolve([]),
+      live ? fetchCdrLive(live.from, live.to) : Promise.resolve([]),
+    ]);
+    return histRows.concat(liveRows);
+  });
 }
 
 /** Índice telefono+fecha → candidatos de cdr_custom, para replicar el LATERAL
@@ -796,7 +819,9 @@ const TIP_LABEL = {
 
 export async function fetchTipoContacto() {
   // catálogo chico (16 filas), sin ventana de fechas — siempre del espejo.
-  return db('aware_mirror_tipo_contacto').select('nomenclatura_id', 'nomenclatura_nombre', 'contacto_efectivo');
+  return cached('rowfetch:tipo_contacto', 60000, () =>
+    db('aware_mirror_tipo_contacto').select('nomenclatura_id', 'nomenclatura_nombre', 'contacto_efectivo')
+  );
 }
 
 /** Equivalente de la agrupación (tc.cod, tc.nombre, tc.efectivo) + conteo del
@@ -1016,12 +1041,14 @@ async function fetchRegistroMirrorDeliv(queueIds, from, to) {
  *  fetchRegistroRows, solo para el entregable (las demás pantallas no
  *  necesitan json_data y se quedan con la versión liviana). */
 export async function fetchRegistroRowsDeliverable(queueIds, from, to) {
-  const { hist, live } = splitRange(from, to);
-  const [histRows, liveRows] = await Promise.all([
-    hist ? fetchRegistroMirrorDeliv(queueIds, hist.from, hist.to) : Promise.resolve([]),
-    live ? fetchRegistroLiveDeliv(queueIds, live.from, live.to) : Promise.resolve([]),
-  ]);
-  return histRows.concat(liveRows);
+  return cached(fetchKey('registro-deliv', queueIds, from, to), FETCH_TTL_MS, async () => {
+    const { hist, live } = splitRange(from, to);
+    const [histRows, liveRows] = await Promise.all([
+      hist ? fetchRegistroMirrorDeliv(queueIds, hist.from, hist.to) : Promise.resolve([]),
+      live ? fetchRegistroLiveDeliv(queueIds, live.from, live.to) : Promise.resolve([]),
+    ]);
+    return histRows.concat(liveRows);
+  });
 }
 
 function datoContactoValor(dc, labelName) {
@@ -1467,12 +1494,14 @@ async function fetchAgentRankingMirror(queueIds, from, to) {
  *  no depende de v_voicebot_result ni de HUMAN_MATCH; es un conteo directo
  *  sobre la cola humana. */
 export async function fetchAgentRankingRows(queueIds, from, to) {
-  const { hist, live } = splitRange(from, to);
-  const [histRows, liveRows] = await Promise.all([
-    hist ? fetchAgentRankingMirror(queueIds, hist.from, hist.to) : Promise.resolve([]),
-    live ? fetchAgentRankingLive(queueIds, live.from, live.to) : Promise.resolve([]),
-  ]);
-  return histRows.concat(liveRows);
+  return cached(fetchKey('agent-ranking', queueIds, from, to), FETCH_TTL_MS, async () => {
+    const { hist, live } = splitRange(from, to);
+    const [histRows, liveRows] = await Promise.all([
+      hist ? fetchAgentRankingMirror(queueIds, hist.from, hist.to) : Promise.resolve([]),
+      live ? fetchAgentRankingLive(queueIds, live.from, live.to) : Promise.resolve([]),
+    ]);
+    return histRows.concat(liveRows);
+  });
 }
 
 /** getAgentRanking — top 60 agentes (>=5 gestiones) por volumen, con UP/UN/efectivo. */
@@ -1519,12 +1548,14 @@ async function fetchAbandonoMirror(from, to) {
  *  campaña (las colas de Asterisk no están mapeadas a proyecto_id, ver nota
  *  en aware.service.js sobre getQueueAbandon). */
 export async function fetchAbandonoRows(from, to) {
-  const { hist, live } = splitRange(from, to);
-  const [histRows, liveRows] = await Promise.all([
-    hist ? fetchAbandonoMirror(hist.from, hist.to) : Promise.resolve([]),
-    live ? fetchAbandonoLive(live.from, live.to) : Promise.resolve([]),
-  ]);
-  return histRows.concat(liveRows);
+  return cached(fetchKey('abandono', from, to), FETCH_TTL_MS, async () => {
+    const { hist, live } = splitRange(from, to);
+    const [histRows, liveRows] = await Promise.all([
+      hist ? fetchAbandonoMirror(hist.from, hist.to) : Promise.resolve([]),
+      live ? fetchAbandonoLive(live.from, live.to) : Promise.resolve([]),
+    ]);
+    return histRows.concat(liveRows);
+  });
 }
 
 /**

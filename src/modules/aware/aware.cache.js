@@ -11,14 +11,27 @@ export async function cached(key, ttlMs, fn) {
   const now = Date.now();
   if (hit && hit.exp > now) return hit.value;
 
-  const value = await fn();
-  store.set(key, { value, exp: now + ttlMs });
+  // Se guarda la PROMESA (no el valor ya resuelto) y se guarda ANTES de
+  // esperarla — así, varias llamadas concurrentes con la misma key (típico
+  // al abrir una pestaña: ~10 endpoints piden el mismo rango casi al mismo
+  // tiempo) comparten el mismo fetch en vez de disparar uno cada una.
+  // Si falla, se saca de la caché para que la próxima llamada reintente
+  // (un error no debe quedar "cacheado").
+  const promise = (async () => {
+    try {
+      return await fn();
+    } catch (err) {
+      store.delete(key);
+      throw err;
+    }
+  })();
+  store.set(key, { value: promise, exp: now + ttlMs });
 
   // limpieza barata: si el mapa crece mucho, purgar lo vencido
   if (store.size > 200) {
     for (const [k, v] of store) if (v.exp <= now) store.delete(k);
   }
-  return value;
+  return promise;
 }
 
 export function clearAwareCache() {
