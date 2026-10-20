@@ -305,7 +305,9 @@ export function getTransfersAttended(f = {}) {
     return {
       range: { from: r.from, to: r.to },
       total,
-      by_project: by_project.map((p) => ({ ...p, name: PROY.bot[p.proyecto_id] || String(p.proyecto_id) })),
+      by_project: by_project
+        .map((p) => ({ ...p, name: PROY.bot[p.proyecto_id] || String(p.proyecto_id) }))
+        .sort((a, b) => a.proyecto_id - b.proyecto_id),
       approximate: true, // empatado por teléfono+fecha+hora, no hay FK directa
     };
   });

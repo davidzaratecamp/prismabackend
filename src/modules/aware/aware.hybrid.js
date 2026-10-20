@@ -1281,7 +1281,10 @@ export function aggregateRepeatCallers(rows) {
       top.push({ telefono, veces });
     }
   }
-  top.sort((a, b) => b.veces - a.veces);
+  // Desempate por teléfono: el SQL original no fijaba orden para empates en
+  // veces (dependía del plan de Postgres) — acá sí, para que el top-15 no
+  // cambie entre corridas solo por venir de una fuente u otra.
+  top.sort((a, b) => b.veces - a.veces || a.telefono.localeCompare(b.telefono));
   return {
     numeros,
     repiten,
@@ -1486,7 +1489,7 @@ export function aggregateAgentRanking(rows, tipoContactoMap) {
   }
   return [...byAgent.values()]
     .filter((e) => e.calls >= 5)
-    .sort((a, b) => b.calls - a.calls)
+    .sort((a, b) => b.calls - a.calls || a.agente_id.localeCompare(b.agente_id))
     .slice(0, 60)
     .map((e) => ({
       agente_id: e.agente_id,
