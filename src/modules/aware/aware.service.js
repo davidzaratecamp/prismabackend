@@ -44,6 +44,11 @@ import {
   aggregateQueueAbandon,
   toCallRow,
   listCallsMatches,
+  aggregateAgentHangupByProject,
+  aggregateAgentHangupByHour,
+  aggregateAgentHangupOverall,
+  aggregateAgentHangupSample,
+  fetchAgentHangupAvgTurns,
 } from './aware.hybrid.js';
 import { db } from '../../db/knex.js'; // MySQL (prisma_db) — sólo para el snapshot de VoxPro
 import { env } from '../../config/env.js';
@@ -535,57 +540,30 @@ export function getServiceGroups(f = {}) {
 export function getAgentHangup(f = {}) {
   const r = resolveFilters(f);
   return cached(key('agent-hangup', r), 120000, async () => {
-    const forced = { ...r, proyectoIds: f.proyecto != null ? r.proyectoIds : BOT_PROY_IDS };
-    const [byProject, byHour, overall, sample] = await Promise.all([
-      awareQuery(
-        `SELECT proyecto_id, COUNT(*)::int AS total,
-                COUNT(*) FILTER (WHERE hangup_reason='agent_hangup')::int AS ah
-         FROM v_voicebot_result WHERE ${BASE_WHERE} GROUP BY proyecto_id`,
-        baseParams(forced)
-      ),
-      awareQuery(
-        `SELECT EXTRACT(HOUR FROM hora)::int AS hour, COUNT(*)::int AS calls
-         FROM v_voicebot_result
-         WHERE ${BASE_WHERE} AND hangup_reason = 'agent_hangup'
-         GROUP BY 1 ORDER BY 1`,
-        baseParams(r)
-      ),
-      awareQuery(
-        `SELECT COUNT(*)::int AS calls,
-                COALESCE(ROUND(AVG(duracion)), 0)::int AS avg_s,
-                COALESCE(ROUND(AVG(jsonb_array_length(transcript_object)), 1), 0) AS avg_turns
-         FROM v_voicebot_result
-         WHERE ${BASE_WHERE} AND hangup_reason = 'agent_hangup'`,
-        baseParams(r)
-      ),
-      awareQuery(
-        `SELECT call_id, proyecto_id, fecha::text AS fecha, hora::text AS hora, duracion,
-                call_analysis->>'call_summary' AS call_summary
-         FROM v_voicebot_result
-         WHERE ${BASE_WHERE} AND hangup_reason = 'agent_hangup'
-           AND call_analysis->>'call_summary' IS NOT NULL
-         ORDER BY fecha DESC, hora DESC LIMIT 10`,
-        baseParams(r)
-      ),
+    // by_project siempre ambas campañas (igual que el "forced" original);
+    // by_hour/overall/sample usan el alcance realmente pedido (r).
+    const forcedProyectoIds = f.proyecto != null ? r.proyectoIds : BOT_PROY_IDS;
+    const [forcedRows, rRows, avgTurns] = await Promise.all([
+      fetchVoicebotRows(forcedProyectoIds, r.from, r.to),
+      fetchVoicebotRows(r.proyectoIds, r.from, r.to),
+      fetchAgentHangupAvgTurns(r.proyectoIds, r.from, r.to),
     ]);
+    const overall = aggregateAgentHangupOverall(rRows);
     return {
-      by_project: byProject.map((x) => ({
-        proyecto_id: x.proyecto_id,
+      by_project: aggregateAgentHangupByProject(forcedRows).map((x) => ({
+        ...x,
         name: PROY.bot[x.proyecto_id] || String(x.proyecto_id),
-        calls: num(x.total),
-        agent_hangup: num(x.ah),
-        rate: rate(x.ah, x.total),
       })),
-      by_hour: byHour.map((x) => ({ hour: num(x.hour), calls: num(x.calls) })),
-      total: num(overall[0]?.calls),
-      avg_seconds: num(overall[0]?.avg_s),
-      avg_turns: Number(overall[0]?.avg_turns) || 0,
-      sample: sample.map((x) => ({
+      by_hour: aggregateAgentHangupByHour(rRows),
+      total: overall.calls,
+      avg_seconds: overall.avg_seconds,
+      avg_turns: avgTurns,
+      sample: aggregateAgentHangupSample(rRows).map((x) => ({
         call_id: x.call_id,
         proyecto_name: PROY.bot[x.proyecto_id] || String(x.proyecto_id),
         fecha: x.fecha,
-        hora: x.hora ? String(x.hora).slice(0, 8) : null,
-        duration_seconds: x.duracion == null ? null : num(x.duracion),
+        hora: x.hora,
+        duration_seconds: x.duration_seconds,
         call_summary: x.call_summary,
       })),
     };
@@ -831,19 +809,26 @@ export async function getLiveCalls(f = {}) {
   });
 }
 
+/**
+ * Rango de fechas con datos (para los límites del selector de fechas del
+ * front) — ya no depende de Aware: el mínimo sale del espejo (el piso
+ * histórico no cambia) y el máximo es "hoy" siempre, consistente con la
+ * política hoy=Aware/antes=espejo (si todavía no hay llamadas hoy, el
+ * espejo igual sabe cuál fue el último día con datos).
+ */
 export async function getFilterOptions(f = {}) {
   const ids =
     f.proyecto != null && BOT_PROY_IDS.includes(Number(f.proyecto))
       ? [Number(f.proyecto)]
       : BOT_PROY_IDS;
-  const [x] = await awareQuery(
-    `SELECT MIN(fecha)::text AS min_date, MAX(fecha)::text AS max_date
-     FROM v_voicebot_result WHERE proyecto_id = ANY($1::int[])`,
-    [ids]
-  );
+  const row = await db('aware_mirror_voicebot_result')
+    .whereIn('proyecto_id', ids)
+    .min('fecha as min_date')
+    .max('fecha as max_date')
+    .first();
   return {
-    min_date: x?.min_date || null,
-    max_date: x?.max_date || null,
+    min_date: row?.min_date || todayBogota(),
+    max_date: todayBogota(),
     projects: ids.map((id) => ({ proyecto_id: id, name: PROY.bot[id] })),
   };
 }

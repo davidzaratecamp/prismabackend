@@ -1626,3 +1626,90 @@ export function listCallsMatches(v, { hangup, phone, sentiment, callSuccessful }
   }
   return true;
 }
+
+/* ───────────────────────── getAgentHangup (partes sin transcripción) ───────────────────────── */
+
+/** by_project de getAgentHangup — OJO: a diferencia del resto, acá `rows`
+ *  viene siempre de BOT_PROY_IDS (ambas campañas), igual que el original
+ *  forzaba `forced.proyectoIds`. */
+export function aggregateAgentHangupByProject(rows) {
+  const byProy = new Map();
+  for (const row of rows) {
+    const e = byProy.get(row.proyecto_id) || { proyecto_id: row.proyecto_id, total: 0, ah: 0 };
+    e.total += 1;
+    if (row.hangup_reason === 'agent_hangup') e.ah += 1;
+    byProy.set(row.proyecto_id, e);
+  }
+  return [...byProy.values()]
+    .sort((a, b) => a.proyecto_id - b.proyecto_id)
+    .map((e) => ({ proyecto_id: e.proyecto_id, calls: e.total, agent_hangup: e.ah, rate: rate(e.ah, e.total) }));
+}
+
+export function aggregateAgentHangupByHour(rows) {
+  const byHour = new Map();
+  for (const row of rows) {
+    if (row.hangup_reason !== 'agent_hangup') continue;
+    const h = hourOf(row.hora);
+    if (h == null) continue;
+    byHour.set(h, (byHour.get(h) || 0) + 1);
+  }
+  return [...byHour.entries()].sort((a, b) => a[0] - b[0]).map(([hour, calls]) => ({ hour, calls }));
+}
+
+/** calls/avg_seconds de getAgentHangup — avg_turns (necesita transcript_object
+ *  completo) se completa aparte, siempre en vivo (ver fetchAgentHangupAvgTurns). */
+export function aggregateAgentHangupOverall(rows) {
+  let calls = 0;
+  const durations = [];
+  for (const row of rows) {
+    if (row.hangup_reason !== 'agent_hangup') continue;
+    calls += 1;
+    if (row.duracion != null) durations.push(Number(row.duracion));
+  }
+  return {
+    calls,
+    avg_seconds: durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : 0,
+  };
+}
+
+export function aggregateAgentHangupSample(rows) {
+  return rows
+    .filter((row) => row.hangup_reason === 'agent_hangup' && row.call_analysis && row.call_analysis.call_summary)
+    .sort((a, b) => {
+      if (a.fecha !== b.fecha) return a.fecha < b.fecha ? 1 : -1;
+      if (a.hora !== b.hora) return a.hora < b.hora ? 1 : -1;
+      return 0;
+    })
+    .slice(0, 10)
+    .map((row) => ({
+      call_id: row.call_id,
+      proyecto_id: row.proyecto_id,
+      fecha: row.fecha,
+      hora: row.hora ? String(row.hora).slice(0, 8) : null,
+      duration_seconds: row.duracion == null ? null : Number(row.duracion),
+      call_summary: row.call_analysis.call_summary,
+    }));
+}
+
+/**
+ * avg_turns de getAgentHangup — única pieza que sigue en vivo contra Aware
+ * (necesita `jsonb_array_length(transcript_object)`, que el espejo no
+ * guarda). Es un solo número agregado — por la red cruza un entero, no el
+ * jsonb completo (igual razón que fetchTranscriptMeta). Si Aware no
+ * responde, el resto de getAgentHangup se sigue viendo igual, solo este
+ * campo queda en 0.
+ */
+export async function fetchAgentHangupAvgTurns(proyectoIds, from, to) {
+  try {
+    const [x] = await awareQuery(
+      `SELECT COALESCE(ROUND(AVG(jsonb_array_length(transcript_object)), 1), 0) AS avg_turns
+       FROM v_voicebot_result
+       WHERE proyecto_id = ANY($1::int[]) AND fecha BETWEEN $2 AND $3 AND hangup_reason = 'agent_hangup'`,
+      [proyectoIds, from, to]
+    );
+    return Number(x?.avg_turns) || 0;
+  } catch (err) {
+    console.error('[aware.hybrid] no se pudo traer avg_turns de Aware (queda en 0):', err.message);
+    return 0;
+  }
+}
