@@ -463,9 +463,16 @@ async function fetchCdrLive(from, to) {
 }
 
 async function fetchCdrMirror(from, to) {
-  // el espejo ya viene filtrado a los DID de Hogar/TyT desde el sync
-  // (ver HOGAR_TYT_DIDS en aware.mirror.js), no hace falta repetir el filtro acá.
-  return db('aware_mirror_cdr_custom').select('telefono', 'fecha', 'hora', 'call_id').whereBetween('fecha', [from, to]);
+  // El espejo trae Hogar+TyT (HOGAR_TYT_DIDS en aware.mirror.js), pero esta
+  // consulta es solo para el match de Hogar — hay que acotar igual que el
+  // SQL original (cc.call_id = ANY(HOGAR_CDR_DIDS)) o un teléfono que haya
+  // llamado también a una línea de TyT el mismo día contamina el candidato
+  // más cercano (bug real encontrado 2026-10-20 al verificar contra Aware:
+  // 7 llamadas de Hogar caían en el DID equivocado por esto).
+  return db('aware_mirror_cdr_custom')
+    .select('telefono', 'fecha', 'hora', 'call_id')
+    .whereBetween('fecha', [from, to])
+    .whereIn('call_id', HOGAR_CDR_DIDS);
 }
 
 /** Filas crudas de cdr_custom (Hogar) para el rango, Aware (hoy) + espejo (resto). */
