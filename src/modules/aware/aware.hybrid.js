@@ -18,7 +18,13 @@
  * aware.service.js, igual que ya hace aware.mirror.js, para no crear un
  * import circular entre los tres módulos.
  */
-import { awareQuery } from './aware.db.js';
+import {
+  awareQuery,
+  HOGAR_CDR_DIDS,
+  DID_BY_CDR_CALL_ID,
+  DID_BY_QUEUE,
+  DID_PRIMARY_BY_PROY,
+} from './aware.db.js';
 import { db } from '../../db/knex.js';
 import { normTipIA, TIP_IA_VALUES } from './aware.tipmap.js';
 
@@ -436,5 +442,120 @@ export function aggregateFunnel(vRows, registroIndex, range) {
     not_attended: transferidas - atendidas,
     not_attended_rate: rate(transferidas - atendidas, transferidas),
     approximate: true,
+  };
+}
+
+/* ───────────────────────── cdr_custom (DID real por llamada, Hogar) ───────────────────────── */
+
+function timeToSeconds(hhmmss) {
+  if (!hhmmss) return null;
+  const [h, m, s] = hhmmss.split(':').map(Number);
+  return h * 3600 + m * 60 + (s || 0);
+}
+
+async function fetchCdrLive(from, to) {
+  return awareQuery(
+    `SELECT telefono, fecha, hora, call_id
+     FROM cdr_custom
+     WHERE fecha BETWEEN $1 AND $2 AND call_id = ANY($3::text[])`,
+    [from, to, HOGAR_CDR_DIDS]
+  );
+}
+
+async function fetchCdrMirror(from, to) {
+  // el espejo ya viene filtrado a los DID de Hogar/TyT desde el sync
+  // (ver HOGAR_TYT_DIDS en aware.mirror.js), no hace falta repetir el filtro acá.
+  return db('aware_mirror_cdr_custom').select('telefono', 'fecha', 'hora', 'call_id').whereBetween('fecha', [from, to]);
+}
+
+/** Filas crudas de cdr_custom (Hogar) para el rango, Aware (hoy) + espejo (resto). */
+export async function fetchCdrRows(from, to) {
+  const { hist, live } = splitRange(from, to);
+  const [histRows, liveRows] = await Promise.all([
+    hist ? fetchCdrMirror(hist.from, hist.to) : Promise.resolve([]),
+    live ? fetchCdrLive(live.from, live.to) : Promise.resolve([]),
+  ]);
+  return histRows.concat(liveRows);
+}
+
+/** Índice telefono+fecha → candidatos de cdr_custom, para replicar el LATERAL
+ *  que toma la fila con la hora más cercana (ABS(EXTRACT(EPOCH FROM ...))). */
+export function buildCdrMatchIndex(cdrRows) {
+  const map = new Map();
+  for (const c of cdrRows) {
+    const k = `${c.telefono}|${c.fecha}`;
+    let arr = map.get(k);
+    if (!arr) {
+      arr = [];
+      map.set(k, arr);
+    }
+    arr.push({ call_id: c.call_id, seconds: timeToSeconds(c.hora) });
+  }
+  return map;
+}
+
+/** Candidato de cdr_custom con la hora más cercana a vRow.hora (misma
+ *  telefono+fecha) — null si no hay ninguno. */
+export function matchCdr(vRow, index) {
+  const arr = index.get(`${vRow.telefono}|${vRow.fecha}`);
+  if (!arr || !arr.length) return null;
+  const vSec = timeToSeconds(vRow.hora);
+  let best = null;
+  let bestDiff = Infinity;
+  for (const cand of arr) {
+    const diff = Math.abs(cand.seconds - vSec);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = cand;
+    }
+  }
+  return best;
+}
+
+/**
+ * getDidBreakdown — llamadas/transferencias por DID. Hogar vía cdr_custom
+ * (casi exacto); TyT y el resto de Hogar caen al heurístico de cola humana
+ * (matchHuman, igual que el funnel) o al DID principal de la campaña.
+ */
+export function aggregateDidBreakdown(vRows, registroIndex, cdrIndex) {
+  const buckets = new Map();
+  let exactos = 0;
+  for (const v of vRows) {
+    let cdrHit = null;
+    if (v.proyecto_id === 12) {
+      const cand = matchCdr(v, cdrIndex);
+      cdrHit = cand ? DID_BY_CDR_CALL_ID[cand.call_id] || null : null;
+    }
+    let hProy = null;
+    if (v.hangup_reason === 'call_transfer') {
+      const hm = matchHuman(v, registroIndex);
+      if (hm) hProy = hm.proyecto_id;
+    }
+    const didHit = cdrHit || (hProy != null ? DID_BY_QUEUE[hProy] : null);
+    const didInfo = didHit || DID_PRIMARY_BY_PROY[v.proyecto_id];
+    if (!didInfo) continue;
+    if (didHit) exactos += 1;
+    const e = buckets.get(didInfo.did) || { did: didInfo.did, cola: didInfo.cola, calls: 0, transfers: 0 };
+    e.calls += 1;
+    if (v.hangup_reason === 'call_transfer') e.transfers += 1;
+    buckets.set(didInfo.did, e);
+  }
+  const list = [...buckets.values()];
+  const total = list.reduce((s, e) => s + e.calls, 0);
+  const totalTransfers = list.reduce((s, e) => s + e.transfers, 0);
+  return {
+    by_did: list
+      .sort((a, b) => b.calls - a.calls)
+      .map((e) => ({
+        did: e.did,
+        cola: e.cola,
+        calls: e.calls,
+        transfers: e.transfers,
+        call_share: rate(e.calls, total),
+        transfer_share: rate(e.transfers, totalTransfers),
+      })),
+    approximate: exactos < total,
+    exact_rate: rate(exactos, total),
+    note: 'Hogar: DID exacto vía cdr_custom para casi todas las llamadas (transferidas o no). TyT: exacto solo si hubo transferencia atendida por una cola humana; el resto cae al DID principal de la campaña.',
   };
 }

@@ -1,14 +1,4 @@
-import {
-  awareQuery,
-  isAwareConfigured,
-  PROY,
-  BOT_PROY_IDS,
-  AUDIO_BASE_URL,
-  DID_BY_QUEUE,
-  DID_PRIMARY_BY_PROY,
-  HOGAR_CDR_DIDS,
-  DID_BY_CDR_CALL_ID,
-} from './aware.db.js';
+import { awareQuery, isAwareConfigured, PROY, BOT_PROY_IDS, AUDIO_BASE_URL } from './aware.db.js';
 import { cached } from './aware.cache.js';
 import {
   fetchVoicebotRows,
@@ -23,6 +13,9 @@ import {
   buildHumanMatchIndex,
   aggregateFunnel,
   humanQueuesFor,
+  fetchCdrRows,
+  buildCdrMatchIndex,
+  aggregateDidBreakdown,
 } from './aware.hybrid.js';
 import { db } from '../../db/knex.js'; // MySQL (prisma_db) — sólo para el snapshot de VoxPro
 import { matchClaroAsesor, matchClaroAsesorTyt } from './aware.tipmap.js';
@@ -346,20 +339,6 @@ export function getByProject(f = {}) {
 
 // Igual que DELIV_LATERAL/HUMAN_MATCH del entregable, pero solo trae la cola
 // humana (h_proy) — es lo único que hace falta para resolver el DID.
-const HUMAN_MATCH_QUEUE = `
-  LEFT JOIN LATERAL (
-    SELECT r.proyecto_id AS h_proy
-    FROM registro_llamada r
-    WHERE v.hangup_reason = 'call_transfer'
-      AND r.proyecto_id = ANY(CASE WHEN v.proyecto_id = 12 THEN ARRAY[7,9] ELSE ARRAY[10,11] END)
-      AND r.registro_llamada_fono  = v.telefono
-      AND r.registro_llamada_fecha = v.fecha
-      AND r.registro_llamada_hora  > v.hora
-      AND r.time_tmo > 0
-    ORDER BY r.registro_llamada_hora
-    LIMIT 1
-  ) h ON true`;
-
 /**
  * Llamadas y transferencias por DID (línea marcada por Claro).
  *
@@ -376,55 +355,15 @@ const HUMAN_MATCH_QUEUE = `
 export function getDidBreakdown(f = {}) {
   const r = resolveFilters(f);
   return cached(key('did-breakdown', r), 60000, async () => {
-    const rows = await awareQuery(
-      `SELECT v.proyecto_id, v.hangup_reason, h.h_proy, cdr.did_raw, COUNT(*)::int AS calls
-       FROM v_voicebot_result v
-       ${HUMAN_MATCH_QUEUE}
-       LEFT JOIN LATERAL (
-         SELECT cc.call_id AS did_raw
-         FROM cdr_custom cc
-         WHERE v.proyecto_id = 12
-           AND cc.telefono = v.telefono
-           AND cc.fecha = v.fecha
-           AND cc.call_id = ANY($4::text[])
-         ORDER BY ABS(EXTRACT(EPOCH FROM (cc.hora - v.hora)))
-         LIMIT 1
-       ) cdr ON true
-       WHERE ${BASE_WHERE}
-       GROUP BY v.proyecto_id, v.hangup_reason, h.h_proy, cdr.did_raw`,
-      [...baseParams(r), HOGAR_CDR_DIDS]
-    );
-    const buckets = new Map(); // did -> { did, cola, calls, transfers }
-    let exactos = 0;
-    for (const x of rows) {
-      const cdrHit = x.did_raw ? DID_BY_CDR_CALL_ID[x.did_raw] : null;
-      const didHit = cdrHit || (x.h_proy != null ? DID_BY_QUEUE[x.h_proy] : null);
-      const didInfo = didHit || DID_PRIMARY_BY_PROY[x.proyecto_id];
-      if (!didInfo) continue;
-      if (didHit) exactos += num(x.calls);
-      const e = buckets.get(didInfo.did) || { did: didInfo.did, cola: didInfo.cola, calls: 0, transfers: 0 };
-      e.calls += num(x.calls);
-      if (x.hangup_reason === 'call_transfer') e.transfers += num(x.calls);
-      buckets.set(didInfo.did, e);
-    }
-    const list = [...buckets.values()];
-    const total = list.reduce((s, e) => s + e.calls, 0);
-    const totalTransfers = list.reduce((s, e) => s + e.transfers, 0);
-    return {
-      by_did: list
-        .sort((a, b) => b.calls - a.calls)
-        .map((e) => ({
-          did: e.did,
-          cola: e.cola,
-          calls: e.calls,
-          transfers: e.transfers,
-          call_share: rate(e.calls, total),
-          transfer_share: rate(e.transfers, totalTransfers),
-        })),
-      approximate: exactos < total,
-      exact_rate: rate(exactos, total),
-      note: 'Hogar: DID exacto vía cdr_custom para casi todas las llamadas (transferidas o no). TyT: exacto solo si hubo transferencia atendida por una cola humana; el resto cae al DID principal de la campaña.',
-    };
+    const queues = humanQueuesFor(r.proyectoIds);
+    const [vRows, registroRows, cdrRows] = await Promise.all([
+      fetchVoicebotRows(r.proyectoIds, r.from, r.to),
+      fetchRegistroRows(queues, r.from, r.to),
+      fetchCdrRows(r.from, r.to),
+    ]);
+    const registroIdx = buildHumanMatchIndex(registroRows);
+    const cdrIdx = buildCdrMatchIndex(cdrRows);
+    return aggregateDidBreakdown(vRows, registroIdx, cdrIdx);
   });
 }
 
