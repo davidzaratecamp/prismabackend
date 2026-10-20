@@ -20,6 +20,7 @@
  */
 import { awareQuery } from './aware.db.js';
 import { db } from '../../db/knex.js';
+import { normTipIA, TIP_IA_VALUES } from './aware.tipmap.js';
 
 export function todayBogota() {
   return new Date(Date.now() - 5 * 3600000).toISOString().slice(0, 10);
@@ -180,5 +181,133 @@ export function aggregateOverview(rows, range) {
     negative_rate: rate(neg, sent_total),
     successful: ok,
     success_rate: rate(ok, analyzed),
+  };
+}
+
+function nestedPath(ca, ...keys) {
+  let cur = ca;
+  for (const k of keys) {
+    if (cur == null) return null;
+    cur = cur[k];
+  }
+  if (typeof cur === 'string') {
+    const trimmed = cur.trim();
+    return trimmed === '' ? null : trimmed;
+  }
+  return cur ?? null;
+}
+
+/** getVolumeByDay — volumen de llamadas por día (+ transferidas, + hogar/tyt). */
+export function aggregateVolumeByDay(rows) {
+  const byDay = new Map();
+  for (const row of rows) {
+    const e = byDay.get(row.fecha) || { day: row.fecha, calls: 0, transfers: 0, hogar: 0, tyt: 0 };
+    e.calls += 1;
+    if (row.hangup_reason === 'call_transfer') e.transfers += 1;
+    if (row.proyecto_id === 12) e.hogar += 1;
+    if (row.proyecto_id === 13) e.tyt += 1;
+    byDay.set(row.fecha, e);
+  }
+  return [...byDay.values()].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
+}
+
+/** getDailyTrend — tasas (éxito/sentimiento) por día. */
+export function aggregateDailyTrend(rows) {
+  const byDay = new Map();
+  for (const row of rows) {
+    const e = byDay.get(row.fecha) || { day: row.fecha, calls: 0, ok: 0, analyzed: 0, pos: 0, neg: 0, sentTotal: 0 };
+    e.calls += 1;
+    const ca = row.call_analysis || {};
+    if (ca.call_successful === true || ca.call_successful === 'true') {
+      e.ok += 1;
+      e.analyzed += 1;
+    } else if (ca.call_successful === false || ca.call_successful === 'false') {
+      e.analyzed += 1;
+    }
+    if (ca.user_sentiment === 'Positive') {
+      e.pos += 1;
+      e.sentTotal += 1;
+    } else if (ca.user_sentiment === 'Negative') {
+      e.neg += 1;
+      e.sentTotal += 1;
+    } else if (ca.user_sentiment === 'Neutral') {
+      e.sentTotal += 1;
+    }
+    byDay.set(row.fecha, e);
+  }
+  return [...byDay.values()]
+    .sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0))
+    .map((e) => ({
+      day: e.day,
+      calls: e.calls,
+      success_rate: rate(e.ok, e.analyzed),
+      positive_rate: rate(e.pos, e.sentTotal),
+      negative_rate: rate(e.neg, e.sentTotal),
+      neutral_rate: e.sentTotal > 0 ? Math.round(((e.sentTotal - e.pos - e.neg) / e.sentTotal) * 10000) / 10000 : null,
+    }));
+}
+
+/** getHangupBreakdown — totales por motivo de colgado. */
+export function aggregateHangupBreakdown(rows) {
+  const byReason = new Map();
+  for (const row of rows) {
+    const reason = row.hangup_reason || 'sin_dato';
+    byReason.set(reason, (byReason.get(reason) || 0) + 1);
+  }
+  return [...byReason.entries()]
+    .map(([reason, calls]) => ({ reason, calls }))
+    .sort((a, b) => b.calls - a.calls);
+}
+
+/** getSentimentBreakdown — totales por sentimiento (solo filas con call_analysis). */
+export function aggregateSentimentBreakdown(rows) {
+  const bySentiment = new Map();
+  for (const row of rows) {
+    if (row.call_analysis == null) continue;
+    const sentiment = row.call_analysis.user_sentiment || 'Unknown';
+    bySentiment.set(sentiment, (bySentiment.get(sentiment) || 0) + 1);
+  }
+  return [...bySentiment.entries()]
+    .map(([sentiment, calls]) => ({ sentiment, calls }))
+    .sort((a, b) => b.calls - a.calls);
+}
+
+/** getServiceTypes — top 15 TIPO_SERVICIO (custom_analysis_data). */
+export function aggregateServiceTypes(rows) {
+  const byTipo = new Map();
+  for (const row of rows) {
+    if (row.call_analysis == null) continue;
+    const tipo = nestedPath(row.call_analysis, 'custom_analysis_data', 'TIPO_SERVICIO');
+    if (!tipo) continue;
+    byTipo.set(tipo, (byTipo.get(tipo) || 0) + 1);
+  }
+  return [...byTipo.entries()]
+    .map(([tipo, calls]) => ({ tipo, calls }))
+    .sort((a, b) => b.calls - a.calls)
+    .slice(0, 15);
+}
+
+/** getSofiaTipificacion — distribución normalizada de CODIGO_TIPIFICACIONIA. */
+export function aggregateSofiaTipificacion(rows) {
+  const buckets = new Map(TIP_IA_VALUES.map((v) => [v, 0]));
+  let sinEstandarizar = 0;
+  let sinDato = 0;
+  for (const row of rows) {
+    const raw = nestedPath(row.call_analysis, 'custom_analysis_data', 'CODIGO_TIPIFICACIONIA');
+    if (!raw) {
+      sinDato += 1;
+      continue;
+    }
+    const norm = normTipIA(raw);
+    if (norm) buckets.set(norm, (buckets.get(norm) || 0) + 1);
+    else sinEstandarizar += 1;
+  }
+  const total = [...buckets.values()].reduce((s, n) => s + n, 0) + sinEstandarizar + sinDato;
+  const rowsOut = [...buckets.entries()].map(([tipificacion, calls]) => ({ tipificacion, calls }));
+  if (sinEstandarizar) rowsOut.push({ tipificacion: 'Sin estandarizar', calls: sinEstandarizar });
+  if (sinDato) rowsOut.push({ tipificacion: 'Sin dato', calls: sinDato });
+  return {
+    total,
+    rows: rowsOut.sort((a, b) => b.calls - a.calls).map((x) => ({ ...x, rate: rate(x.calls, total) })),
   };
 }

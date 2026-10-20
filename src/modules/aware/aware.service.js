@@ -10,9 +10,18 @@ import {
   DID_BY_CDR_CALL_ID,
 } from './aware.db.js';
 import { cached } from './aware.cache.js';
-import { fetchVoicebotRows, aggregateOverview } from './aware.hybrid.js';
+import {
+  fetchVoicebotRows,
+  aggregateOverview,
+  aggregateVolumeByDay,
+  aggregateDailyTrend,
+  aggregateHangupBreakdown,
+  aggregateSentimentBreakdown,
+  aggregateServiceTypes,
+  aggregateSofiaTipificacion,
+} from './aware.hybrid.js';
 import { db } from '../../db/knex.js'; // MySQL (prisma_db) — sólo para el snapshot de VoxPro
-import { normTipIA, TIP_IA_VALUES, matchClaroAsesor, matchClaroAsesorTyt } from './aware.tipmap.js';
+import { matchClaroAsesor, matchClaroAsesorTyt } from './aware.tipmap.js';
 import { env } from '../../config/env.js';
 
 /* ───────────────────────── helpers ───────────────────────── */
@@ -171,26 +180,8 @@ export function getPeriodComparison(f = {}) {
 export function getVolumeByDay(f = {}) {
   const r = resolveFilters(f);
   return cached(key('volume-by-day', r), 60000, async () => {
-    const rows = await awareQuery(
-      `SELECT fecha::text AS day, proyecto_id,
-              COUNT(*)::int AS calls,
-              COUNT(*) FILTER (WHERE hangup_reason = 'call_transfer')::int AS transfers
-       FROM v_voicebot_result
-       WHERE ${BASE_WHERE}
-       GROUP BY fecha, proyecto_id
-       ORDER BY fecha`,
-      baseParams(r)
-    );
-    const byDay = new Map();
-    for (const row of rows) {
-      const e = byDay.get(row.day) || { day: row.day, calls: 0, transfers: 0, hogar: 0, tyt: 0 };
-      e.calls += num(row.calls);
-      e.transfers += num(row.transfers);
-      if (row.proyecto_id === 12) e.hogar += num(row.calls);
-      if (row.proyecto_id === 13) e.tyt += num(row.calls);
-      byDay.set(row.day, e);
-    }
-    return [...byDay.values()];
+    const rows = await fetchVoicebotRows(r.proyectoIds, r.from, r.to);
+    return aggregateVolumeByDay(rows);
   });
 }
 
@@ -251,30 +242,8 @@ export function getHangupByDay(f = {}) {
 export function getDailyTrend(f = {}) {
   const r = resolveFilters(f);
   return cached(key('daily-trend', r), 60000, async () => {
-    const rows = await awareQuery(
-      `SELECT fecha::text AS day,
-              COUNT(*)::int AS calls,
-              COUNT(*) FILTER (WHERE call_analysis->>'call_successful' = 'true')::int AS ok,
-              COUNT(*) FILTER (WHERE call_analysis->>'call_successful' IN ('true','false'))::int AS analyzed,
-              COUNT(*) FILTER (WHERE call_analysis->>'user_sentiment' = 'Positive')::int AS pos,
-              COUNT(*) FILTER (WHERE call_analysis->>'user_sentiment' = 'Negative')::int AS neg,
-              COUNT(*) FILTER (WHERE call_analysis->>'user_sentiment' IN ('Positive','Negative','Neutral'))::int AS sent_total
-       FROM v_voicebot_result
-       WHERE ${BASE_WHERE}
-       GROUP BY fecha ORDER BY fecha`,
-      baseParams(r)
-    );
-    return rows.map((x) => ({
-      day: x.day,
-      calls: num(x.calls),
-      success_rate: rate(x.ok, x.analyzed),
-      positive_rate: rate(x.pos, x.sent_total),
-      negative_rate: rate(x.neg, x.sent_total),
-      neutral_rate:
-        num(x.sent_total) > 0
-          ? Math.round(((num(x.sent_total) - num(x.pos) - num(x.neg)) / num(x.sent_total)) * 10000) / 10000
-          : null,
-    }));
+    const rows = await fetchVoicebotRows(r.proyectoIds, r.from, r.to);
+    return aggregateDailyTrend(rows);
   });
 }
 
@@ -283,46 +252,24 @@ export function getDailyTrend(f = {}) {
 export function getHangupBreakdown(f = {}) {
   const r = resolveFilters(f);
   return cached(key('hangup', r), 60000, async () => {
-    const rows = await awareQuery(
-      `SELECT COALESCE(hangup_reason, 'sin_dato') AS reason, COUNT(*)::int AS calls
-       FROM v_voicebot_result
-       WHERE ${BASE_WHERE}
-       GROUP BY 1 ORDER BY calls DESC`,
-      baseParams(r)
-    );
-    return rows.map((x) => ({ reason: x.reason, calls: num(x.calls) }));
+    const rows = await fetchVoicebotRows(r.proyectoIds, r.from, r.to);
+    return aggregateHangupBreakdown(rows);
   });
 }
 
 export function getSentimentBreakdown(f = {}) {
   const r = resolveFilters(f);
   return cached(key('sentiment', r), 60000, async () => {
-    const rows = await awareQuery(
-      `SELECT COALESCE(call_analysis->>'user_sentiment', 'Unknown') AS sentiment, COUNT(*)::int AS calls
-       FROM v_voicebot_result
-       WHERE ${BASE_WHERE} AND call_analysis IS NOT NULL
-       GROUP BY 1 ORDER BY calls DESC`,
-      baseParams(r)
-    );
-    return rows.map((x) => ({ sentiment: x.sentiment, calls: num(x.calls) }));
+    const rows = await fetchVoicebotRows(r.proyectoIds, r.from, r.to);
+    return aggregateSentimentBreakdown(rows);
   });
 }
 
 export function getServiceTypes(f = {}) {
   const r = resolveFilters(f);
   return cached(key('service-types', r), 60000, async () => {
-    const rows = await awareQuery(
-      `SELECT NULLIF(TRIM(call_analysis->'custom_analysis_data'->>'TIPO_SERVICIO'), '') AS tipo,
-              COUNT(*)::int AS calls
-       FROM v_voicebot_result
-       WHERE ${BASE_WHERE} AND call_analysis IS NOT NULL
-       GROUP BY 1 ORDER BY calls DESC NULLS LAST
-       LIMIT 15`,
-      baseParams(r)
-    );
-    return rows
-      .filter((x) => x.tipo)
-      .map((x) => ({ tipo: x.tipo, calls: num(x.calls) }));
+    const rows = await fetchVoicebotRows(r.proyectoIds, r.from, r.to);
+    return aggregateServiceTypes(rows);
   });
 }
 
@@ -488,37 +435,8 @@ export function getDidBreakdown(f = {}) {
 export function getSofiaTipificacion(f = {}) {
   const r = resolveFilters(f);
   return cached(key('sofia-tipificacion', r), 60000, async () => {
-    const rows = await awareQuery(
-      `SELECT NULLIF(TRIM(call_analysis->'custom_analysis_data'->>'CODIGO_TIPIFICACIONIA'), '') AS raw,
-              COUNT(*)::int AS calls
-       FROM v_voicebot_result
-       WHERE ${BASE_WHERE}
-       GROUP BY raw`,
-      baseParams(r)
-    );
-    const buckets = new Map(TIP_IA_VALUES.map((v) => [v, 0]));
-    let sinEstandarizar = 0;
-    let sinDato = 0;
-    for (const x of rows) {
-      const n = num(x.calls);
-      if (!x.raw) {
-        sinDato += n;
-        continue;
-      }
-      const norm = normTipIA(x.raw);
-      if (norm) buckets.set(norm, (buckets.get(norm) || 0) + n);
-      else sinEstandarizar += n;
-    }
-    const total = [...buckets.values()].reduce((s, n) => s + n, 0) + sinEstandarizar + sinDato;
-    const rowsOut = [...buckets.entries()].map(([tipificacion, calls]) => ({ tipificacion, calls }));
-    if (sinEstandarizar) rowsOut.push({ tipificacion: 'Sin estandarizar', calls: sinEstandarizar });
-    if (sinDato) rowsOut.push({ tipificacion: 'Sin dato', calls: sinDato });
-    return {
-      total,
-      rows: rowsOut
-        .sort((a, b) => b.calls - a.calls)
-        .map((x) => ({ ...x, rate: rate(x.calls, total) })),
-    };
+    const rows = await fetchVoicebotRows(r.proyectoIds, r.from, r.to);
+    return aggregateSofiaTipificacion(rows);
   });
 }
 
