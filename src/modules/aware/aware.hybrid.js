@@ -959,7 +959,13 @@ export function buildDeliverableMatchIndex(registroRows) {
 export function buildDeliverableRows(vRows, registroIndex, cdrIndex, tipoContactoMap) {
   const out = [];
   for (const v of vRows) {
-    const hm = matchHuman(v, registroIndex);
+    // DELIV_LATERAL (y HUMAN_MATCH/HUMAN_MATCH_TIP) exigen hangup_reason =
+    // 'call_transfer' DENTRO del LATERAL, no solo como filtro externo — sin
+    // este guard, una llamada de gestión IA (no transferida) podía heredar
+    // por error la tipificación/DID de un match de registro_llamada que no
+    // le correspondía (bug real encontrado 2026-10-20 al verificar contra
+    // Aware: 3 de 1000 filas de la muestra, siempre TyT/"Gestión IA").
+    const hm = v.hangup_reason === 'call_transfer' ? matchHuman(v, registroIndex) : null;
     const cdrCand = v.proyecto_id === 12 ? matchCdr(v, cdrIndex) : null;
     const tipoInfo = hm && hm.nom ? tipoContactoMap.get(hm.nom) : null;
     const ca = v.call_analysis || {};
