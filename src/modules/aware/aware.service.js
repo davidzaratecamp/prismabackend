@@ -24,6 +24,11 @@ import {
   aggregateVentaDetalle,
   fetchNoVentaCampaignRows,
   aggregateNoVentaArbol,
+  aggregateVolumeByHour,
+  aggregateHeatmap,
+  aggregateHangupByDay,
+  aggregateDurationBuckets,
+  aggregateByProject,
 } from './aware.hybrid.js';
 import { db } from '../../db/knex.js'; // MySQL (prisma_db) — sólo para el snapshot de VoxPro
 import { env } from '../../config/env.js';
@@ -144,54 +149,24 @@ export function getVolumeByDay(f = {}) {
 export function getVolumeByHour(f = {}) {
   const r = resolveFilters(f);
   return cached(key('volume-by-hour', r), 60000, async () => {
-    const rows = await awareQuery(
-      `SELECT EXTRACT(HOUR FROM hora)::int AS hour, COUNT(*)::int AS calls
-       FROM v_voicebot_result
-       WHERE ${BASE_WHERE}
-       GROUP BY 1 ORDER BY 1`,
-      baseParams(r)
-    );
-    return rows.map((x) => ({ hour: num(x.hour), calls: num(x.calls) }));
+    const rows = await fetchVoicebotRows(r.proyectoIds, r.from, r.to);
+    return aggregateVolumeByHour(rows);
   });
 }
 
 export function getHeatmap(f = {}) {
   const r = resolveFilters(f);
   return cached(key('heatmap', r), 60000, async () => {
-    const rows = await awareQuery(
-      `SELECT EXTRACT(HOUR FROM hora)::int AS hour,
-              (EXTRACT(ISODOW FROM fecha)::int - 1) AS weekday,
-              COUNT(*)::int AS calls
-       FROM v_voicebot_result
-       WHERE ${BASE_WHERE}
-       GROUP BY 1, 2`,
-      baseParams(r)
-    );
-    return rows.map((x) => ({ hour: num(x.hour), weekday: num(x.weekday), calls: num(x.calls) }));
+    const rows = await fetchVoicebotRows(r.proyectoIds, r.from, r.to);
+    return aggregateHeatmap(rows);
   });
 }
 
 export function getHangupByDay(f = {}) {
   const r = resolveFilters(f);
   return cached(key('hangup-by-day', r), 60000, async () => {
-    const rows = await awareQuery(
-      `SELECT fecha::text AS day,
-              COUNT(*) FILTER (WHERE hangup_reason = 'call_transfer')::int AS transfer,
-              COUNT(*) FILTER (WHERE hangup_reason = 'user_hangup')::int  AS user_hangup,
-              COUNT(*) FILTER (WHERE hangup_reason = 'agent_hangup')::int AS agent_hangup,
-              COUNT(*) FILTER (WHERE hangup_reason = 'inactivity')::int   AS inactivity
-       FROM v_voicebot_result
-       WHERE ${BASE_WHERE}
-       GROUP BY fecha ORDER BY fecha`,
-      baseParams(r)
-    );
-    return rows.map((x) => ({
-      day: x.day,
-      transfer: num(x.transfer),
-      user_hangup: num(x.user_hangup),
-      agent_hangup: num(x.agent_hangup),
-      inactivity: num(x.inactivity),
-    }));
+    const rows = await fetchVoicebotRows(r.proyectoIds, r.from, r.to);
+    return aggregateHangupByDay(rows);
   });
 }
 
@@ -232,26 +207,8 @@ export function getServiceTypes(f = {}) {
 export function getDurationBuckets(f = {}) {
   const r = resolveFilters(f);
   return cached(key('duration-buckets', r), 60000, async () => {
-    const [x] = await awareQuery(
-      `SELECT
-         COUNT(*) FILTER (WHERE duracion < 15)::int AS b0_15,
-         COUNT(*) FILTER (WHERE duracion >= 15 AND duracion < 30)::int AS b15_30,
-         COUNT(*) FILTER (WHERE duracion >= 30 AND duracion < 60)::int AS b30_60,
-         COUNT(*) FILTER (WHERE duracion >= 60 AND duracion < 180)::int AS b60_180,
-         COUNT(*) FILTER (WHERE duracion >= 180 AND duracion < 300)::int AS b180_300,
-         COUNT(*) FILTER (WHERE duracion >= 300)::int AS b300
-       FROM v_voicebot_result
-       WHERE ${BASE_WHERE} AND duracion IS NOT NULL`,
-      baseParams(r)
-    );
-    return [
-      { bucket: '0-15s', calls: num(x.b0_15) },
-      { bucket: '15-30s', calls: num(x.b15_30) },
-      { bucket: '30-60s', calls: num(x.b30_60) },
-      { bucket: '1-3min', calls: num(x.b60_180) },
-      { bucket: '3-5min', calls: num(x.b180_300) },
-      { bucket: '5min+', calls: num(x.b300) },
-    ];
+    const rows = await fetchVoicebotRows(r.proyectoIds, r.from, r.to);
+    return aggregateDurationBuckets(rows);
   });
 }
 
@@ -262,34 +219,10 @@ export function getByProject(f = {}) {
   // Normalmente ambas campañas; si el filtro (o el alcance del analista) fija una, respetarla.
   const r = { ...base, proyectoIds: f.proyecto != null ? base.proyectoIds : BOT_PROY_IDS };
   return cached(key('by-project', r), 60000, async () => {
-    const rows = await awareQuery(
-      `SELECT proyecto_id,
-              COUNT(*)::int AS total,
-              COUNT(*) FILTER (WHERE hangup_reason = 'call_transfer')::int AS transfer,
-              COUNT(*) FILTER (WHERE hangup_reason = 'user_hangup')::int  AS user_hangup,
-              COUNT(*) FILTER (WHERE hangup_reason = 'agent_hangup')::int AS agent_hangup,
-              COUNT(*) FILTER (WHERE hangup_reason = 'inactivity')::int   AS inactivity,
-              COALESCE(ROUND(AVG(duracion)), 0)::int AS avg_dur,
-              COUNT(*) FILTER (WHERE call_analysis->>'call_successful' = 'true')::int AS ok,
-              COUNT(*) FILTER (WHERE call_analysis->>'call_successful' IN ('true','false'))::int AS analyzed,
-              COUNT(*) FILTER (WHERE call_analysis->>'user_sentiment' = 'Positive')::int AS pos,
-              COUNT(*) FILTER (WHERE call_analysis->>'user_sentiment' IN ('Positive','Negative','Neutral'))::int AS sent_total
-       FROM v_voicebot_result
-       WHERE ${BASE_WHERE}
-       GROUP BY proyecto_id`,
-      baseParams(r)
-    );
-    return rows.map((x) => ({
-      proyecto_id: x.proyecto_id,
+    const rows = await fetchVoicebotRows(r.proyectoIds, r.from, r.to);
+    return aggregateByProject(rows).map((x) => ({
+      ...x,
       name: PROY.bot[x.proyecto_id] || String(x.proyecto_id),
-      calls: num(x.total),
-      transfer_rate: rate(x.transfer, x.total),
-      user_hangup_rate: rate(x.user_hangup, x.total),
-      agent_hangup_rate: rate(x.agent_hangup, x.total),
-      inactivity_rate: rate(x.inactivity, x.total),
-      avg_duration_seconds: num(x.avg_dur),
-      success_rate: rate(x.ok, x.analyzed),
-      positive_rate: rate(x.pos, x.sent_total),
     }));
   });
 }

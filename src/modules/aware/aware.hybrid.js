@@ -328,6 +328,125 @@ export function aggregateSofiaTipificacion(rows) {
   };
 }
 
+function hourOf(hora) {
+  if (!hora) return null;
+  return Number(String(hora).slice(0, 2));
+}
+/** EXTRACT(ISODOW FROM fecha)::int - 1 (0=lunes .. 6=domingo), sobre una
+ *  fecha 'YYYY-MM-DD' (se parsea en UTC para no correr de día). */
+function isodowMinus1(fecha) {
+  const d = new Date(`${fecha}T00:00:00Z`);
+  return (d.getUTCDay() + 6) % 7;
+}
+
+/** getVolumeByHour — volumen por hora del día. */
+export function aggregateVolumeByHour(rows) {
+  const byHour = new Map();
+  for (const row of rows) {
+    const h = hourOf(row.hora);
+    if (h == null) continue;
+    byHour.set(h, (byHour.get(h) || 0) + 1);
+  }
+  return [...byHour.entries()]
+    .map(([hour, calls]) => ({ hour, calls }))
+    .sort((a, b) => a.hour - b.hour);
+}
+
+/** getHeatmap — volumen por hora × día de la semana. */
+export function aggregateHeatmap(rows) {
+  const byKey = new Map();
+  for (const row of rows) {
+    const h = hourOf(row.hora);
+    if (h == null) continue;
+    const w = isodowMinus1(row.fecha);
+    const k = `${h}|${w}`;
+    const e = byKey.get(k) || { hour: h, weekday: w, calls: 0 };
+    e.calls += 1;
+    byKey.set(k, e);
+  }
+  return [...byKey.values()];
+}
+
+/** getHangupByDay — motivo de colgado por día. */
+export function aggregateHangupByDay(rows) {
+  const byDay = new Map();
+  for (const row of rows) {
+    const e = byDay.get(row.fecha) || { day: row.fecha, transfer: 0, user_hangup: 0, agent_hangup: 0, inactivity: 0 };
+    if (row.hangup_reason === 'call_transfer') e.transfer += 1;
+    else if (row.hangup_reason === 'user_hangup') e.user_hangup += 1;
+    else if (row.hangup_reason === 'agent_hangup') e.agent_hangup += 1;
+    else if (row.hangup_reason === 'inactivity') e.inactivity += 1;
+    byDay.set(row.fecha, e);
+  }
+  return [...byDay.values()].sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
+}
+
+/** getDurationBuckets — histograma de duración. */
+export function aggregateDurationBuckets(rows) {
+  let b0_15 = 0, b15_30 = 0, b30_60 = 0, b60_180 = 0, b180_300 = 0, b300 = 0;
+  for (const row of rows) {
+    if (row.duracion == null) continue;
+    const d = Number(row.duracion);
+    if (d < 15) b0_15++;
+    else if (d < 30) b15_30++;
+    else if (d < 60) b30_60++;
+    else if (d < 180) b60_180++;
+    else if (d < 300) b180_300++;
+    else b300++;
+  }
+  return [
+    { bucket: '0-15s', calls: b0_15 },
+    { bucket: '15-30s', calls: b15_30 },
+    { bucket: '30-60s', calls: b30_60 },
+    { bucket: '1-3min', calls: b60_180 },
+    { bucket: '3-5min', calls: b180_300 },
+    { bucket: '5min+', calls: b300 },
+  ];
+}
+
+/** getByProject — rollup de KPIs por campaña (proyecto_id). */
+export function aggregateByProject(rows) {
+  const byProy = new Map();
+  for (const row of rows) {
+    const e = byProy.get(row.proyecto_id) || {
+      proyecto_id: row.proyecto_id,
+      total: 0, transfer: 0, user_hangup: 0, agent_hangup: 0, inactivity: 0,
+      durations: [], ok: 0, analyzed: 0, pos: 0, sentTotal: 0,
+    };
+    e.total += 1;
+    if (row.hangup_reason === 'call_transfer') e.transfer += 1;
+    else if (row.hangup_reason === 'user_hangup') e.user_hangup += 1;
+    else if (row.hangup_reason === 'agent_hangup') e.agent_hangup += 1;
+    else if (row.hangup_reason === 'inactivity') e.inactivity += 1;
+    if (row.duracion != null) e.durations.push(Number(row.duracion));
+    const ca = row.call_analysis || {};
+    if (ca.call_successful === true || ca.call_successful === 'true') {
+      e.ok += 1;
+      e.analyzed += 1;
+    } else if (ca.call_successful === false || ca.call_successful === 'false') {
+      e.analyzed += 1;
+    }
+    if (ca.user_sentiment === 'Positive') {
+      e.pos += 1;
+      e.sentTotal += 1;
+    } else if (ca.user_sentiment === 'Negative' || ca.user_sentiment === 'Neutral') {
+      e.sentTotal += 1;
+    }
+    byProy.set(row.proyecto_id, e);
+  }
+  return [...byProy.values()].map((e) => ({
+    proyecto_id: e.proyecto_id,
+    calls: e.total,
+    transfer_rate: rate(e.transfer, e.total),
+    user_hangup_rate: rate(e.user_hangup, e.total),
+    agent_hangup_rate: rate(e.agent_hangup, e.total),
+    inactivity_rate: rate(e.inactivity, e.total),
+    avg_duration_seconds: e.durations.length ? Math.round(e.durations.reduce((a, b) => a + b, 0) / e.durations.length) : 0,
+    success_rate: rate(e.ok, e.analyzed),
+    positive_rate: rate(e.pos, e.sentTotal),
+  }));
+}
+
 /* ───────────────────────── registro_llamada (colas humanas) ───────────────────────── */
 
 export const HOGAR_QUEUES = [7, 9];
