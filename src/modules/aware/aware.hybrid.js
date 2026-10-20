@@ -311,3 +311,130 @@ export function aggregateSofiaTipificacion(rows) {
     rows: rowsOut.sort((a, b) => b.calls - a.calls).map((x) => ({ ...x, rate: rate(x.calls, total) })),
   };
 }
+
+/* ───────────────────────── registro_llamada (colas humanas) ───────────────────────── */
+
+export const HOGAR_QUEUES = [7, 9];
+export const TYT_QUEUES = [10, 11];
+
+/** Colas humanas relevantes según las campañas pedidas — igual a humanQueues()
+ *  en aware.service.js (duplicado acá por la misma razón que el resto). */
+export function humanQueuesFor(proyectoIds) {
+  const set = new Set();
+  if (proyectoIds.includes(12)) HOGAR_QUEUES.forEach((q) => set.add(q));
+  if (proyectoIds.includes(13)) TYT_QUEUES.forEach((q) => set.add(q));
+  return [...set];
+}
+
+const REGISTRO_COLS = [
+  'proyecto_id',
+  'registro_llamada_fono',
+  'registro_llamada_fecha',
+  'registro_llamada_hora',
+  'time_tmo',
+  'registro_llamada_id',
+  'nomenclatura_id',
+];
+
+async function fetchRegistroLive(queueIds, from, to) {
+  if (!queueIds.length) return [];
+  return awareQuery(
+    `SELECT ${REGISTRO_COLS.join(', ')}
+     FROM registro_llamada
+     WHERE proyecto_id = ANY($1::int[]) AND registro_llamada_fecha BETWEEN $2 AND $3 AND time_tmo > 0`,
+    [queueIds, from, to]
+  );
+}
+
+async function fetchRegistroMirror(queueIds, from, to) {
+  if (!queueIds.length) return [];
+  return db('aware_mirror_registro_llamada')
+    .select(REGISTRO_COLS)
+    .whereIn('proyecto_id', queueIds)
+    .whereBetween('registro_llamada_fecha', [from, to])
+    .where('time_tmo', '>', 0);
+}
+
+/**
+ * Filas crudas de registro_llamada (colas humanas) para el rango, combinando
+ * Aware (hoy) + espejo MySQL (antes de hoy). Ya filtradas por `time_tmo > 0`
+ * (igual que HUMAN_MATCH/HUMAN_MATCH_TIP en aware.service.js, ver el
+ * comentario ahí sobre por qué `time_tmo` y no `time_speaking`).
+ */
+export async function fetchRegistroRows(queueIds, from, to) {
+  const { hist, live } = splitRange(from, to);
+  const [histRows, liveRows] = await Promise.all([
+    hist ? fetchRegistroMirror(queueIds, hist.from, hist.to) : Promise.resolve([]),
+    live ? fetchRegistroLive(queueIds, live.from, live.to) : Promise.resolve([]),
+  ]);
+  return histRows.concat(liveRows);
+}
+
+/**
+ * Índice telefono+fecha → candidatos de registro_llamada (ordenados por
+ * hora asc), para replicar en JS el LEFT JOIN LATERAL de HUMAN_MATCH /
+ * HUMAN_MATCH_TIP: dado un v_voicebot_result transferido, el primer registro
+ * humano de la cola correcta con hora > v.hora.
+ */
+export function buildHumanMatchIndex(registroRows) {
+  const map = new Map();
+  for (const r of registroRows) {
+    const k = `${r.registro_llamada_fono}|${r.registro_llamada_fecha}`;
+    let arr = map.get(k);
+    if (!arr) {
+      arr = [];
+      map.set(k, arr);
+    }
+    arr.push({
+      hora: r.registro_llamada_hora,
+      proyecto_id: Number(r.proyecto_id),
+      rid: r.registro_llamada_id,
+      nom: r.nomenclatura_id,
+    });
+  }
+  for (const arr of map.values()) arr.sort((a, b) => (a.hora < b.hora ? -1 : a.hora > b.hora ? 1 : 0));
+  return map;
+}
+
+/** Replica HUMAN_MATCH/HUMAN_MATCH_TIP para una fila de v_voicebot_result
+ *  transferida: primer candidato (por hora asc) de la cola humana correcta
+ *  con hora > v.hora. `null` si no hay match (igual semántica que la LATERAL
+ *  con LIMIT 1 — un mismo registro puede matchear más de una llamada, es el
+ *  mismo heurístico aproximado que ya usa el código en vivo). */
+export function matchHuman(vRow, index) {
+  const arr = index.get(`${vRow.telefono}|${vRow.fecha}`);
+  if (!arr || !arr.length) return null;
+  const queues = vRow.proyecto_id === 12 ? HOGAR_QUEUES : TYT_QUEUES;
+  for (const cand of arr) {
+    if (cand.hora > vRow.hora && queues.includes(cand.proyecto_id)) return cand;
+  }
+  return null;
+}
+
+/** getFunnel — entrantes → conectadas → transferidas → atendidas. */
+export function aggregateFunnel(vRows, registroIndex, range) {
+  let entrantes = 0;
+  let conectadas = 0;
+  let transferidas = 0;
+  let atendidas = 0;
+  for (const v of vRows) {
+    entrantes++;
+    if (v.hangup_reason != null) conectadas++;
+    if (v.hangup_reason === 'call_transfer') {
+      transferidas++;
+      if (matchHuman(v, registroIndex)) atendidas++;
+    }
+  }
+  return {
+    range,
+    stages: [
+      { key: 'entrantes', label: 'Llamadas entrantes', count: entrantes, of_prev: null },
+      { key: 'conectadas', label: 'Conectaron con el bot', count: conectadas, of_prev: rate(conectadas, entrantes) },
+      { key: 'transferidas', label: 'Transferidas a asesor', count: transferidas, of_prev: rate(transferidas, conectadas) },
+      { key: 'atendidas', label: 'Atendidas por un asesor', count: atendidas, of_prev: rate(atendidas, transferidas) },
+    ],
+    not_attended: transferidas - atendidas,
+    not_attended_rate: rate(transferidas - atendidas, transferidas),
+    approximate: true,
+  };
+}

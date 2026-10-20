@@ -19,6 +19,10 @@ import {
   aggregateSentimentBreakdown,
   aggregateServiceTypes,
   aggregateSofiaTipificacion,
+  fetchRegistroRows,
+  buildHumanMatchIndex,
+  aggregateFunnel,
+  humanQueuesFor,
 } from './aware.hybrid.js';
 import { db } from '../../db/knex.js'; // MySQL (prisma_db) — sólo para el snapshot de VoxPro
 import { matchClaroAsesor, matchClaroAsesorTyt } from './aware.tipmap.js';
@@ -624,32 +628,13 @@ function humanQueues(proyectoIds) {
 export function getFunnel(f = {}) {
   const r = resolveFilters(f);
   return cached(key('funnel', r), 300000, async () => {
-    const [x] = await awareQuery(
-      `SELECT
-         COUNT(*)::int AS entrantes,
-         COUNT(*) FILTER (WHERE v.hangup_reason IS NOT NULL)::int AS conectadas,
-         COUNT(*) FILTER (WHERE v.hangup_reason = 'call_transfer')::int AS transferidas,
-         COUNT(h.rid)::int AS atendidas
-       FROM v_voicebot_result v ${HUMAN_MATCH}
-       WHERE v.proyecto_id = ANY($1::int[]) AND v.fecha BETWEEN $2 AND $3`,
-      baseParams(r)
-    );
-    const entrantes = num(x.entrantes);
-    const conectadas = num(x.conectadas);
-    const transferidas = num(x.transferidas);
-    const atendidas = num(x.atendidas);
-    return {
-      range: { from: r.from, to: r.to },
-      stages: [
-        { key: 'entrantes', label: 'Llamadas entrantes', count: entrantes, of_prev: null },
-        { key: 'conectadas', label: 'Conectaron con el bot', count: conectadas, of_prev: rate(conectadas, entrantes) },
-        { key: 'transferidas', label: 'Transferidas a asesor', count: transferidas, of_prev: rate(transferidas, conectadas) },
-        { key: 'atendidas', label: 'Atendidas por un asesor', count: atendidas, of_prev: rate(atendidas, transferidas) },
-      ],
-      not_attended: transferidas - atendidas,
-      not_attended_rate: rate(transferidas - atendidas, transferidas),
-      approximate: true,
-    };
+    const queues = humanQueuesFor(r.proyectoIds);
+    const [vRows, registroRows] = await Promise.all([
+      fetchVoicebotRows(r.proyectoIds, r.from, r.to),
+      fetchRegistroRows(queues, r.from, r.to),
+    ]);
+    const idx = buildHumanMatchIndex(registroRows);
+    return aggregateFunnel(vRows, idx, { from: r.from, to: r.to });
   });
 }
 
