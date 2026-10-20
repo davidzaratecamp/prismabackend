@@ -492,9 +492,14 @@ async function fetchRegistroMirror(queueIds, from, to) {
 
 /**
  * Filas crudas de registro_llamada (colas humanas) para el rango, combinando
- * Aware (hoy) + espejo MySQL (antes de hoy). Ya filtradas por `time_tmo > 0`
- * (igual que HUMAN_MATCH/HUMAN_MATCH_TIP en aware.service.js, ver el
- * comentario ahí sobre por qué `time_tmo` y no `time_speaking`).
+ * Aware (hoy) + espejo MySQL (antes de hoy). Ya filtradas por `time_tmo > 0`,
+ * NO `time_speaking > 0` (antes HUMAN_MATCH/HUMAN_MATCH_TIP en
+ * aware.service.js, ahora acá): `time_speaking` viene en 0 en ~20% de las
+ * gestiones reales de asesor (confirmado contra `time_tmo` y
+ * `json_data.time_speaking`, que sí coinciden entre sí) — un defecto de esa
+ * columna específica en el origen, no un abandono real. Usarla acá perdía
+ * llamadas atendidas de verdad (ej. registro_llamada_id 145286, UTIL
+ * NEGATIVO, time_speaking=0 pero time_tmo=93 — reportado 2026-09-15).
  */
 export async function fetchRegistroRows(queueIds, from, to) {
   const { hist, live } = splitRange(from, to);
@@ -1181,4 +1186,440 @@ export async function fetchTranscriptMeta(callIds, { withText = false } = {}) {
     console.error('[aware.hybrid] no se pudo traer la transcripción de Aware (turnos/texto quedan vacíos):', err.message);
     return new Map();
   }
+}
+
+/* ───────────────────────── transferencias atendidas / embudo por día ───────────────────────── */
+
+/** getTransfersAttended — igual heurístico que getFunnel, por campaña. */
+export function aggregateTransfersAttended(vRows, registroIndex) {
+  const byProy = new Map();
+  for (const v of vRows) {
+    if (v.hangup_reason !== 'call_transfer') continue;
+    const e = byProy.get(v.proyecto_id) || { transfers: 0, attended: 0 };
+    e.transfers += 1;
+    if (matchHuman(v, registroIndex)) e.attended += 1;
+    byProy.set(v.proyecto_id, e);
+  }
+  const by_project = [...byProy.entries()].map(([proyecto_id, e]) => ({
+    proyecto_id,
+    transfers: e.transfers,
+    attended: e.attended,
+    not_attended: e.transfers - e.attended,
+    attended_rate: rate(e.attended, e.transfers),
+  }));
+  const transfers = by_project.reduce((s, p) => s + p.transfers, 0);
+  const attended = by_project.reduce((s, p) => s + p.attended, 0);
+  return {
+    by_project,
+    total: { transfers, attended, not_attended: transfers - attended, attended_rate: rate(attended, transfers) },
+  };
+}
+
+/** getNotAttendedByDay — transferidas/atendidas por día. */
+export function aggregateNotAttendedByDay(vRows, registroIndex) {
+  const byDay = new Map();
+  for (const v of vRows) {
+    if (v.hangup_reason !== 'call_transfer') continue;
+    const e = byDay.get(v.fecha) || { day: v.fecha, transferidas: 0, atendidas: 0 };
+    e.transferidas += 1;
+    if (matchHuman(v, registroIndex)) e.atendidas += 1;
+    byDay.set(v.fecha, e);
+  }
+  return [...byDay.values()]
+    .sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0))
+    .map((e) => ({
+      day: e.day,
+      transferidas: e.transferidas,
+      atendidas: e.atendidas,
+      no_atendidas: e.transferidas - e.atendidas,
+      atendidas_rate: rate(e.atendidas, e.transferidas),
+    }));
+}
+
+/** getHumanFunnelByDay — transferidas/atendidas/UP por día. */
+export function aggregateHumanFunnelByDay(vRows, registroIndex) {
+  const byDay = new Map();
+  for (const v of vRows) {
+    if (v.hangup_reason !== 'call_transfer') continue;
+    const e = byDay.get(v.fecha) || { day: v.fecha, transferidas: 0, atendidas: 0, up: 0 };
+    e.transferidas += 1;
+    const hm = matchHuman(v, registroIndex);
+    if (hm) {
+      e.atendidas += 1;
+      if (hm.nom === 'UP') e.up += 1;
+    }
+    byDay.set(v.fecha, e);
+  }
+  return [...byDay.values()]
+    .sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0))
+    .map((e) => ({
+      day: e.day,
+      transferidas: e.transferidas,
+      atendidas: e.atendidas,
+      util_positivo: e.up,
+      conversion_rate: rate(e.up, e.atendidas),
+    }));
+}
+
+/* ───────────────────────── repetidores / operación ───────────────────────── */
+
+/** getRepeatCallers — números que llaman 2+ veces en el rango. */
+export function aggregateRepeatCallers(rows) {
+  const byPhone = new Map();
+  for (const row of rows) {
+    if (!row.telefono) continue;
+    byPhone.set(row.telefono, (byPhone.get(row.telefono) || 0) + 1);
+  }
+  const numeros = byPhone.size;
+  let repiten = 0;
+  let llamadas_de_repiten = 0;
+  const top = [];
+  for (const [telefono, veces] of byPhone) {
+    if (veces >= 2) {
+      repiten += 1;
+      llamadas_de_repiten += veces;
+      top.push({ telefono, veces });
+    }
+  }
+  top.sort((a, b) => b.veces - a.veces);
+  return {
+    numeros,
+    repiten,
+    repiten_rate: rate(repiten, numeros),
+    llamadas_de_repiten,
+    top: top.slice(0, 15),
+  };
+}
+
+/** getHourlyOps — volumen/transferencias por hora, normalizado por días con datos. */
+export function aggregateHourlyOps(rows) {
+  const byHour = new Map();
+  const daysByHour = new Map();
+  for (const row of rows) {
+    const h = hourOf(row.hora);
+    if (h == null) continue;
+    const e = byHour.get(h) || { calls: 0, transfers: 0 };
+    e.calls += 1;
+    if (row.hangup_reason === 'call_transfer') e.transfers += 1;
+    byHour.set(h, e);
+    let set = daysByHour.get(h);
+    if (!set) {
+      set = new Set();
+      daysByHour.set(h, set);
+    }
+    set.add(row.fecha);
+  }
+  return [...byHour.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([hour, e]) => {
+      const days = Math.max(1, daysByHour.get(hour)?.size || 1);
+      return {
+        hour,
+        calls: e.calls,
+        transfers: e.transfers,
+        calls_per_day: Math.round((e.calls / days) * 10) / 10,
+        transfers_per_day: Math.round((e.transfers / days) * 10) / 10,
+        transfer_rate: rate(e.transfers, e.calls),
+      };
+    });
+}
+
+const WEEKDAY_NAMES = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo'];
+
+/** getWeekdayOps — volumen/transferencias por día de la semana. */
+export function aggregateWeekdayOps(rows) {
+  const byWd = new Map();
+  const daysByWd = new Map();
+  for (const row of rows) {
+    const w = isodowMinus1(row.fecha);
+    const e = byWd.get(w) || { calls: 0, transfers: 0 };
+    e.calls += 1;
+    if (row.hangup_reason === 'call_transfer') e.transfers += 1;
+    byWd.set(w, e);
+    let set = daysByWd.get(w);
+    if (!set) {
+      set = new Set();
+      daysByWd.set(w, set);
+    }
+    set.add(row.fecha);
+  }
+  return [...byWd.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([weekday, e]) => {
+      const days = Math.max(1, daysByWd.get(weekday)?.size || 1);
+      return {
+        weekday,
+        label: WEEKDAY_NAMES[weekday] || String(weekday),
+        calls: e.calls,
+        transfers: e.transfers,
+        days: daysByWd.get(weekday)?.size || 0,
+        calls_per_day: Math.round(e.calls / days),
+        transfers_per_day: Math.round(e.transfers / days),
+      };
+    });
+}
+
+/* ───────────────────────── cruces (sin transcripción) ───────────────────────── */
+
+/** getDurationByOutcome — duración (avg/p50/p90) por motivo de colgado. */
+export function aggregateDurationByOutcome(rows) {
+  const byReason = new Map();
+  for (const row of rows) {
+    if (row.duracion == null) continue;
+    const reason = row.hangup_reason || 'sin_dato';
+    const e = byReason.get(reason) || { reason, durations: [] };
+    e.durations.push(Number(row.duracion));
+    byReason.set(reason, e);
+  }
+  return [...byReason.values()]
+    .map((e) => {
+      const sorted = [...e.durations].sort((a, b) => a - b);
+      return {
+        reason: e.reason,
+        calls: e.durations.length,
+        avg_seconds: Math.round(e.durations.reduce((a, b) => a + b, 0) / e.durations.length),
+        p50_seconds: percentileCont(sorted, 0.5),
+        p90_seconds: percentileCont(sorted, 0.9),
+      };
+    })
+    .sort((a, b) => b.calls - a.calls);
+}
+
+/** getSentimentByOutcome — motivo de colgado por sentimiento. */
+export function aggregateSentimentByOutcome(rows) {
+  const bySentiment = new Map();
+  for (const row of rows) {
+    if (row.call_analysis == null) continue;
+    const sentiment = row.call_analysis.user_sentiment || 'Unknown';
+    const e = bySentiment.get(sentiment) || {
+      sentiment, total: 0, transfer: 0, user_hangup: 0, agent_hangup: 0, inactivity: 0,
+    };
+    e.total += 1;
+    if (row.hangup_reason === 'call_transfer') e.transfer += 1;
+    else if (row.hangup_reason === 'user_hangup') e.user_hangup += 1;
+    else if (row.hangup_reason === 'agent_hangup') e.agent_hangup += 1;
+    else if (row.hangup_reason === 'inactivity') e.inactivity += 1;
+    bySentiment.set(sentiment, e);
+  }
+  return [...bySentiment.values()].sort((a, b) => b.total - a.total);
+}
+
+// normaliza el texto libre de TIPO_SERVICIO en grupos — duplicado de
+// aware.service.js (misma razón que el resto de constantes/funciones acá).
+function serviceGroup(t) {
+  const s = (t || '').toLowerCase();
+  if (!s) return 'sin dato';
+  if (/hogar|internet|servicios hogar|television|tv|fijo/.test(s)) return 'Hogar / Internet';
+  if (/celular|movil|móvil|linea|línea|pospago|prepago|plan/.test(s)) return 'Celular / Móvil';
+  if (/tecnolog|productos tecn|business|plataforma|equipo|dispositiv/.test(s)) return 'Tecnología';
+  if (/cliente|factura|pago|reclamo|soporte|pqr/.test(s)) return 'Servicio al cliente';
+  return 'Otro';
+}
+
+/** getServiceGroups — TIPO_SERVICIO agrupado en 5 categorías. */
+export function aggregateServiceGroups(rows) {
+  const acc = new Map();
+  for (const row of rows) {
+    if (row.call_analysis == null) continue;
+    const tipoRaw = nestedPath(row.call_analysis, 'custom_analysis_data', 'TIPO_SERVICIO');
+    const tipo = typeof tipoRaw === 'string' ? tipoRaw.toLowerCase() : tipoRaw;
+    const g = serviceGroup(tipo);
+    const e = acc.get(g) || { grupo: g, total: 0, transfer: 0, ok: 0, analyzed: 0 };
+    e.total += 1;
+    if (row.hangup_reason === 'call_transfer') e.transfer += 1;
+    const ca = row.call_analysis;
+    if (ca.call_successful === true || ca.call_successful === 'true') {
+      e.ok += 1;
+      e.analyzed += 1;
+    } else if (ca.call_successful === false || ca.call_successful === 'false') {
+      e.analyzed += 1;
+    }
+    acc.set(g, e);
+  }
+  return [...acc.values()]
+    .map((e) => ({ grupo: e.grupo, calls: e.total, transfer_rate: rate(e.transfer, e.total), success_rate: rate(e.ok, e.analyzed) }))
+    .sort((a, b) => b.calls - a.calls);
+}
+
+/* ───────────────────────── ranking de agentes (registro_llamada directo) ───────────────────────── */
+
+async function fetchAgentRankingLive(queueIds, from, to) {
+  if (!queueIds.length) return [];
+  return awareQuery(
+    `SELECT agente_id, nomenclatura_id
+     FROM registro_llamada
+     WHERE proyecto_id = ANY($1::int[]) AND registro_llamada_fecha BETWEEN $2 AND $3 AND agente_id IS NOT NULL`,
+    [queueIds, from, to]
+  );
+}
+async function fetchAgentRankingMirror(queueIds, from, to) {
+  if (!queueIds.length) return [];
+  return db('aware_mirror_registro_llamada')
+    .select('agente_id', 'nomenclatura_id')
+    .whereIn('proyecto_id', queueIds)
+    .whereBetween('registro_llamada_fecha', [from, to])
+    .whereNotNull('agente_id');
+}
+/** registro_llamada (agente_id, nomenclatura_id) para el ranking de agentes —
+ *  no depende de v_voicebot_result ni de HUMAN_MATCH; es un conteo directo
+ *  sobre la cola humana. */
+export async function fetchAgentRankingRows(queueIds, from, to) {
+  const { hist, live } = splitRange(from, to);
+  const [histRows, liveRows] = await Promise.all([
+    hist ? fetchAgentRankingMirror(queueIds, hist.from, hist.to) : Promise.resolve([]),
+    live ? fetchAgentRankingLive(queueIds, live.from, live.to) : Promise.resolve([]),
+  ]);
+  return histRows.concat(liveRows);
+}
+
+/** getAgentRanking — top 60 agentes (>=5 gestiones) por volumen, con UP/UN/efectivo. */
+export function aggregateAgentRanking(rows, tipoContactoMap) {
+  const byAgent = new Map();
+  for (const row of rows) {
+    const e = byAgent.get(row.agente_id) || { agente_id: row.agente_id, calls: 0, up: 0, un: 0, efectivo: 0 };
+    e.calls += 1;
+    if (row.nomenclatura_id === 'UP') e.up += 1;
+    if (row.nomenclatura_id === 'UN') e.un += 1;
+    const info = tipoContactoMap.get(row.nomenclatura_id);
+    if (info && info.contacto_efectivo === 'Contacto Efectivo') e.efectivo += 1;
+    byAgent.set(row.agente_id, e);
+  }
+  return [...byAgent.values()]
+    .filter((e) => e.calls >= 5)
+    .sort((a, b) => b.calls - a.calls)
+    .slice(0, 60)
+    .map((e) => ({
+      agente_id: e.agente_id,
+      calls: e.calls,
+      up: e.up,
+      un: e.un,
+      up_rate: rate(e.up, e.calls),
+      efectivo_rate: rate(e.efectivo, e.calls),
+    }));
+}
+
+/* ───────────────────────── abandono en cola (v_abandono) ───────────────────────── */
+
+const ABANDONO_COLS = ['id', 'fecha', 'hora', 'telefono', 'cola', 'tiempo_espera'];
+
+async function fetchAbandonoLive(from, to) {
+  return awareQuery(
+    `SELECT id, fecha::text AS fecha, hora::text AS hora, telefono, cola, tiempo_espera
+     FROM v_abandono WHERE fecha BETWEEN $1 AND $2`,
+    [from, to]
+  );
+}
+async function fetchAbandonoMirror(from, to) {
+  return db('aware_mirror_abandono').select(ABANDONO_COLS).whereBetween('fecha', [from, to]);
+}
+/** v_abandono para el rango — Aware (hoy) + espejo (resto), sin filtrar por
+ *  campaña (las colas de Asterisk no están mapeadas a proyecto_id, ver nota
+ *  en aware.service.js sobre getQueueAbandon). */
+export async function fetchAbandonoRows(from, to) {
+  const { hist, live } = splitRange(from, to);
+  const [histRows, liveRows] = await Promise.all([
+    hist ? fetchAbandonoMirror(hist.from, hist.to) : Promise.resolve([]),
+    live ? fetchAbandonoLive(live.from, live.to) : Promise.resolve([]),
+  ]);
+  return histRows.concat(liveRows);
+}
+
+/**
+ * getQueueAbandon — atribuye cada abandono a la campaña de la ÚLTIMA
+ * transferencia de SOFIA del mismo teléfono, mismo día, con hora anterior al
+ * abandono (igual heurístico que abandonRows() en aware.service.js, ahora en
+ * JS sobre filas combinadas espejo+Aware en vez del CTE+subquery original).
+ */
+export function aggregateQueueAbandon(abandonoRows, transferRows, proyectoIds) {
+  // índice telefono|fecha -> transferencias (hora asc), para buscar la
+  // última con hora < hora del abandono.
+  const idx = new Map();
+  for (const t of transferRows) {
+    if (t.hangup_reason !== 'call_transfer') continue;
+    const k = `${t.telefono}|${t.fecha}`;
+    let arr = idx.get(k);
+    if (!arr) {
+      arr = [];
+      idx.set(k, arr);
+    }
+    arr.push({ hora: t.hora, proyecto_id: t.proyecto_id });
+  }
+  for (const arr of idx.values()) arr.sort((a, b) => (a.hora < b.hora ? -1 : a.hora > b.hora ? 1 : 0));
+
+  const matchProyecto = (ab) => {
+    const arr = idx.get(`${ab.telefono}|${ab.fecha}`);
+    if (!arr) return null;
+    let best = null;
+    for (const cand of arr) {
+      if (cand.hora < ab.hora) best = cand; // el array va ascendente: el último que cumpla es el más cercano
+      else break;
+    }
+    return best ? best.proyecto_id : null;
+  };
+
+  const withProy = abandonoRows.map((ab) => ({ ...ab, proyecto_id: matchProyecto(ab) }));
+  const own = withProy.filter((x) => x.proyecto_id != null && proyectoIds.includes(x.proyecto_id));
+  const matched = withProy.filter((x) => x.proyecto_id != null).length;
+
+  const avg = (list) => (list.length ? Math.round(list.reduce((s, x) => s + Number(x.tiempo_espera || 0), 0) / list.length) : 0);
+  const byDay = new Map();
+  for (const x of own) {
+    const e = byDay.get(x.fecha) || { day: x.fecha, list: [] };
+    e.list.push(x);
+    byDay.set(x.fecha, e);
+  }
+  const byQueue = new Map();
+  for (const x of own) byQueue.set(x.cola, (byQueue.get(x.cola) || 0) + 1);
+
+  return {
+    total: own.length,
+    avg_espera_s: avg(own),
+    max_espera_s: own.reduce((m, x) => Math.max(m, Number(x.tiempo_espera || 0)), 0),
+    match_rate: rate(matched, withProy.length),
+    by_day: [...byDay.values()]
+      .sort((a, b) => a.day.localeCompare(b.day))
+      .map((e) => ({ day: e.day, abandonos: e.list.length, avg_espera_s: avg(e.list) })),
+    by_queue: [...byQueue.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 12)
+      .map(([cola, abandonos]) => ({ cola, abandonos })),
+  };
+}
+
+/* ───────────────────────── listado de llamadas (sin joins) ───────────────────────── */
+
+/** listCalls — mismo shape de fila que antes devolvía el SELECT (para que
+ *  mapCallRow, sin cambios, lo siga consumiendo igual). */
+export function toCallRow(v) {
+  const ca = v.call_analysis || {};
+  return {
+    proyecto_id: v.proyecto_id,
+    call_id: v.call_id,
+    fecha: v.fecha,
+    hora: v.hora,
+    hangup_reason: v.hangup_reason,
+    duracion: v.duracion,
+    telefono: v.telefono,
+    audiofile: v.audiofile,
+    sentiment: ca.user_sentiment ?? null,
+    call_successful: ca.call_successful == null ? null : String(ca.call_successful),
+    call_summary: ca.call_summary ?? null,
+  };
+}
+
+/** Aplica los filtros opcionales de listCalls (hangup/phone/sentiment/
+ *  callSuccessful) sobre las filas crudas de fetchVoicebotRows. */
+export function listCallsMatches(v, { hangup, phone, sentiment, callSuccessful }) {
+  if (hangup && v.hangup_reason !== hangup) return false;
+  if (phone) {
+    const clean = String(phone).replace(/[%_]/g, '');
+    if (!(v.telefono && v.telefono.toLowerCase().includes(clean.toLowerCase()))) return false;
+  }
+  const ca = v.call_analysis || {};
+  if (sentiment && ca.user_sentiment !== sentiment) return false;
+  if (callSuccessful === 'true' || callSuccessful === 'false') {
+    const s = ca.call_successful == null ? null : String(ca.call_successful);
+    if (s !== callSuccessful) return false;
+  }
+  return true;
 }
