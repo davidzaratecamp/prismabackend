@@ -26,7 +26,7 @@ import {
   DID_PRIMARY_BY_PROY,
 } from './aware.db.js';
 import { db } from '../../db/knex.js';
-import { normTipIA, TIP_IA_VALUES } from './aware.tipmap.js';
+import { normTipIA, TIP_IA_VALUES, matchClaroAsesor, matchClaroAsesorTyt } from './aware.tipmap.js';
 
 export function todayBogota() {
   return new Date(Date.now() - 5 * 3600000).toISOString().slice(0, 10);
@@ -634,5 +634,195 @@ export function aggregateDidBreakdown(vRows, registroIndex, cdrIndex) {
     approximate: exactos < total,
     exact_rate: rate(exactos, total),
     note: 'Hogar: DID exacto vía cdr_custom para casi todas las llamadas (transferidas o no). TyT: exacto solo si hubo transferencia atendida por una cola humana; el resto cae al DID principal de la campaña.',
+  };
+}
+
+/* ───────────────────────── getHumanOutcomes (embudo de negocio) ───────────────────────── */
+
+// Duplicado de aware.service.js (mismo motivo que el resto de constantes acá).
+const TIP_RENAME = { UP: 'VENTA EXITOSA', UN: 'NO VENTA' };
+const TIP_LABEL = {
+  UP: 'VENTA EXITOSA',
+  UN: 'NO VENTA',
+  VLL: 'MANIFIESTA INTERÉS',
+  DME: 'VOLVER A LLAMAR',
+  EO: 'CLIENTE OCUPADO',
+  CFA: 'CLIENTE FALLECIDO',
+  FCH: 'FUERA DEL PAÍS',
+  FER: 'FONO NO CORRESPONDE',
+  ABN: 'ABANDONO',
+  NC: 'NO CONTESTA',
+  ND: 'FONO NO DISPONIBLE',
+  ERC: 'ERROR DE CONEXIÓN',
+  FS: 'FUERA DE SERVICIO',
+  GRB: 'GRABADORA',
+  TF: 'TONO FAX',
+  TO: 'TONO OCUPADO',
+};
+
+export async function fetchTipoContacto() {
+  // catálogo chico (16 filas), sin ventana de fechas — siempre del espejo.
+  return db('aware_mirror_tipo_contacto').select('nomenclatura_id', 'nomenclatura_nombre', 'contacto_efectivo');
+}
+
+/** Equivalente de la agrupación (tc.cod, tc.nombre, tc.efectivo) + conteo del
+ *  SELECT principal de getHumanOutcomes, calculado sobre las filas de v +
+ *  el índice de matchHuman (igual heurístico que funnel/did-breakdown). */
+export function aggregateHumanOutcomesMain(vRows, registroIndex, tipoContactoMap) {
+  let transfers = 0;
+  let atendidas = 0;
+  let up = 0;
+  let un = 0;
+  let efectivas = 0;
+  const grouped = new Map(); // cod -> { nombre, efectivo, n }
+  for (const v of vRows) {
+    if (v.hangup_reason !== 'call_transfer') continue;
+    transfers++;
+    const hm = matchHuman(v, registroIndex);
+    const cod = hm ? hm.nom : null;
+    if (!cod) continue;
+    atendidas++;
+    if (cod === 'UP') up++;
+    if (cod === 'UN') un++;
+    const info = tipoContactoMap.get(cod);
+    const efectivo = info ? info.contacto_efectivo : null;
+    if (efectivo === 'Contacto Efectivo') efectivas++;
+    let g = grouped.get(cod);
+    if (!g) {
+      g = { nombre: info ? info.nomenclatura_nombre : null, efectivo, n: 0 };
+      grouped.set(cod, g);
+    }
+    g.n++;
+  }
+  const tip = [...grouped.entries()].map(([cod, g]) => ({
+    cod,
+    nombre: TIP_RENAME[cod] || g.nombre || TIP_LABEL[cod] || cod,
+    efectivo: g.efectivo,
+    calls: g.n,
+  }));
+  tip.sort((a, b) => b.calls - a.calls);
+  const otros_resultados = tip.filter((t) => t.cod !== 'UP' && t.cod !== 'UN');
+  return { transfers, atendidas, up, un, efectivas, tip, otros_resultados };
+}
+
+async function fetchRegistroUpUnLive(queueIds, from, to, nom) {
+  if (!queueIds.length) return [];
+  return awareQuery(
+    `SELECT json_data FROM registro_llamada
+     WHERE proyecto_id = ANY($1::int[]) AND registro_llamada_fecha BETWEEN $2 AND $3 AND nomenclatura_id = $4`,
+    [queueIds, from, to, nom]
+  );
+}
+async function fetchRegistroUpUnMirror(queueIds, from, to, nom) {
+  if (!queueIds.length) return [];
+  const rows = await db('aware_mirror_registro_llamada')
+    .select('json_data')
+    .whereIn('proyecto_id', queueIds)
+    .whereBetween('registro_llamada_fecha', [from, to])
+    .where('nomenclatura_id', nom);
+  return rows.map((r) => ({ json_data: normalizeJson(r.json_data) }));
+}
+/** registro_llamada con nomenclatura_id = 'UP'/'UN' para el rango — SIN
+ *  filtro de time_tmo (ventaDetalleFor/noVentaArbolFor en aware.service.js
+ *  tampoco lo tienen; cuentan todo lo tipificado, no solo lo emparejado por
+ *  el heurístico de transferencia). */
+async function fetchRegistroUpUn(queueIds, from, to, nom) {
+  const { hist, live } = splitRange(from, to);
+  const [histRows, liveRows] = await Promise.all([
+    hist ? fetchRegistroUpUnMirror(queueIds, hist.from, hist.to, nom) : Promise.resolve([]),
+    live ? fetchRegistroUpUnLive(queueIds, live.from, live.to, nom) : Promise.resolve([]),
+  ]);
+  return histRows.concat(liveRows);
+}
+
+const VENTA_LABEL_OUT = {
+  'ACCESOS (TRIPLE, DOBLE, SENCILLO CON @)': 'accesos',
+  'TV Y/O VOZ': 'tv_voz',
+  ADICIONALES: 'adicionales',
+  TERMINALES: 'terminales',
+  TECNOLOGIA: 'tecnologia',
+  'CLARO UP': 'claro_up',
+};
+
+/** ventaDetalleFor — detalle de "venta exitosa" (Hogar: Accesos/TV y Voz/
+ *  Adicionales; TyT: Terminales/Tecnología/Claro Up). */
+export async function fetchVentaDetalleRows(queueIds, from, to, totalUp) {
+  if (!queueIds.length || !totalUp) return [];
+  return fetchRegistroUpUn(queueIds, from, to, 'UP');
+}
+export function aggregateVentaDetalle(rows, totalUp) {
+  if (!totalUp) return [];
+  const counts = { accesos: 0, tv_voz: 0, adicionales: 0, terminales: 0, tecnologia: 0, claro_up: 0 };
+  for (const row of rows) {
+    const dc = row.json_data && row.json_data.datos_contacto;
+    if (!dc || typeof dc !== 'object') continue;
+    const labels = new Set(Object.values(dc).map((v) => v && v.label_name));
+    for (const [labelText, bucket] of Object.entries(VENTA_LABEL_OUT)) {
+      if (labels.has(labelText)) counts[bucket]++;
+    }
+  }
+  return [
+    { label: 'ACCESOS', calls: counts.accesos },
+    { label: 'TV Y/O VOZ', calls: counts.tv_voz },
+    { label: 'ADICIONALES', calls: counts.adicionales },
+    { label: 'TERMINALES', calls: counts.terminales },
+    { label: 'TECNOLOGIA', calls: counts.tecnologia },
+    { label: 'CLARO UP', calls: counts.claro_up },
+  ]
+    .filter((x) => x.calls > 0)
+    .map((x) => ({ ...x, rate: rate(x.calls, totalUp) }));
+}
+
+/** noVentaArbolFor — árbol oficial de "no venta" por campaña (Hogar/TyT, cada
+ *  una con su propio árbol/alias — matchClaroAsesor / matchClaroAsesorTyt). */
+export async function fetchNoVentaCampaignRows(proyectoIds, from, to, totalUn) {
+  const campaigns = [];
+  if (proyectoIds.includes(12)) campaigns.push({ campana: 'HOGAR', queues: [7, 9], matcher: matchClaroAsesor });
+  if (proyectoIds.includes(13)) campaigns.push({ campana: 'TYT', queues: [10, 11], matcher: matchClaroAsesorTyt });
+  if (!campaigns.length || !totalUn) return [];
+  return Promise.all(
+    campaigns.map(async (c) => ({ ...c, rows: await fetchRegistroUpUn(c.queues, from, to, 'UN') }))
+  );
+}
+export function aggregateNoVentaArbol(campaignRows, totalUn) {
+  if (!campaignRows.length || !totalUn) return { categorias: [], sin_clasificar: null };
+  const multi = campaignRows.length > 1;
+  const buckets = new Map();
+  let clasificados = 0;
+  let sinClasificar = 0;
+  for (const { campana, matcher, rows } of campaignRows) {
+    for (const row of rows) {
+      const raw = row.json_data && row.json_data.motivo_rechazo_texto;
+      if (typeof raw !== 'string') continue;
+      const motivo = raw.replace(/\s+/g, ' ').trim().toUpperCase();
+      if (!motivo) continue;
+      const hit = matcher(motivo);
+      if (hit && hit.categoria !== 'VENTA EXITOSA') {
+        clasificados += 1;
+        const bkey = multi ? `${campana}:${hit.tip}` : hit.tip;
+        const e = buckets.get(bkey) || { tip: hit.tip, categoria: hit.categoria, label: hit.label, calls: 0 };
+        e.calls += 1;
+        buckets.set(bkey, e);
+      } else {
+        sinClasificar += 1;
+      }
+    }
+  }
+  sinClasificar += Math.max(0, totalUn - clasificados - sinClasificar);
+
+  const porCategoria = new Map();
+  for (const b of buckets.values()) {
+    const list = porCategoria.get(b.categoria) || [];
+    list.push({ tip: b.tip, label: b.label, calls: b.calls, rate: rate(b.calls, totalUn) });
+    porCategoria.set(b.categoria, list);
+  }
+  const ORDEN = ['NO VENTA', 'LLAMADA DE SERVICIO', 'INCONSISTENCIA'];
+  const categorias = ORDEN.filter((c) => porCategoria.has(c)).map((c) => ({
+    categoria: c,
+    items: porCategoria.get(c).sort((a, b) => b.calls - a.calls),
+  }));
+  return {
+    categorias,
+    sin_clasificar: sinClasificar > 0 ? { calls: sinClasificar, rate: rate(sinClasificar, totalUn) } : null,
   };
 }

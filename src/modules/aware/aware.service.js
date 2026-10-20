@@ -18,9 +18,14 @@ import {
   aggregateDidBreakdown,
   aggregateBotStats,
   aggregateHumanStats,
+  fetchTipoContacto,
+  aggregateHumanOutcomesMain,
+  fetchVentaDetalleRows,
+  aggregateVentaDetalle,
+  fetchNoVentaCampaignRows,
+  aggregateNoVentaArbol,
 } from './aware.hybrid.js';
 import { db } from '../../db/knex.js'; // MySQL (prisma_db) — sólo para el snapshot de VoxPro
-import { matchClaroAsesor, matchClaroAsesorTyt } from './aware.tipmap.js';
 import { env } from '../../config/env.js';
 
 /* ───────────────────────── helpers ───────────────────────── */
@@ -870,192 +875,39 @@ export function getAgentHangup(f = {}) {
 
 /* ───────────────────────── pata del asesor humano ───────────────────────── */
 
-// Nombre a mostrar por código — para UP/UN se fuerza el rename aunque Aware
-// mande su propio texto ("UTIL POSITIVO"/"UTIL NEGATIVO"); para el resto se
-// usa el texto real de Aware (tc.nomenclatura_nombre) y esto solo es respaldo.
-const TIP_RENAME = { UP: 'VENTA EXITOSA', UN: 'NO VENTA' };
-const TIP_LABEL = {
-  UP: 'VENTA EXITOSA', UN: 'NO VENTA', VLL: 'MANIFIESTA INTERÉS',
-  DME: 'VOLVER A LLAMAR', EO: 'CLIENTE OCUPADO', CFA: 'CLIENTE FALLECIDO',
-  FCH: 'FUERA DEL PAÍS', FER: 'FONO NO CORRESPONDE', ABN: 'ABANDONO',
-  NC: 'NO CONTESTA', ND: 'FONO NO DISPONIBLE', ERC: 'ERROR DE CONEXIÓN',
-  FS: 'FUERA DE SERVICIO', GRB: 'GRABADORA', TF: 'TONO FAX', TO: 'TONO OCUPADO',
-};
-
-/** Detalle de la venta exitosa — Hogar (Accesos/TV y Voz/Adicionales) y TyT
- *  (Terminales/Tecnología/Claro Up) en una sola consulta: cada label_name
- *  solo existe en su campaña, así que el que no aplica sale en 0 y se filtra
- *  solo, sin necesidad de ramificar por campaña aquí. */
-async function ventaDetalleFor(proyectoIds, from, to, totalUp) {
-  const queues = humanQueues(proyectoIds);
-  if (!queues.length || !totalUp) return [];
-  const [d] = await awareQuery(
-    `SELECT
-       COUNT(*) FILTER (WHERE EXISTS (
-         SELECT 1 FROM jsonb_each(rl.json_data->'datos_contacto') dc
-         WHERE dc.value->>'label_name' = 'ACCESOS (TRIPLE, DOBLE, SENCILLO CON @)'))::int AS accesos,
-       COUNT(*) FILTER (WHERE EXISTS (
-         SELECT 1 FROM jsonb_each(rl.json_data->'datos_contacto') dc
-         WHERE dc.value->>'label_name' = 'TV Y/O VOZ'))::int AS tv_voz,
-       COUNT(*) FILTER (WHERE EXISTS (
-         SELECT 1 FROM jsonb_each(rl.json_data->'datos_contacto') dc
-         WHERE dc.value->>'label_name' = 'ADICIONALES'))::int AS adicionales,
-       COUNT(*) FILTER (WHERE EXISTS (
-         SELECT 1 FROM jsonb_each(rl.json_data->'datos_contacto') dc
-         WHERE dc.value->>'label_name' = 'TERMINALES'))::int AS terminales,
-       COUNT(*) FILTER (WHERE EXISTS (
-         SELECT 1 FROM jsonb_each(rl.json_data->'datos_contacto') dc
-         WHERE dc.value->>'label_name' = 'TECNOLOGIA'))::int AS tecnologia,
-       COUNT(*) FILTER (WHERE EXISTS (
-         SELECT 1 FROM jsonb_each(rl.json_data->'datos_contacto') dc
-         WHERE dc.value->>'label_name' = 'CLARO UP'))::int AS claro_up
-     FROM registro_llamada rl
-     WHERE rl.proyecto_id = ANY($1::int[]) AND rl.registro_llamada_fecha BETWEEN $2 AND $3
-       AND rl.nomenclatura_id = 'UP'`,
-    [queues, from, to]
-  );
-  return [
-    { label: 'ACCESOS', calls: num(d?.accesos) },
-    { label: 'TV Y/O VOZ', calls: num(d?.tv_voz) },
-    { label: 'ADICIONALES', calls: num(d?.adicionales) },
-    { label: 'TERMINALES', calls: num(d?.terminales) },
-    { label: 'TECNOLOGIA', calls: num(d?.tecnologia) },
-    { label: 'CLARO UP', calls: num(d?.claro_up) },
-  ]
-    .filter((x) => x.calls > 0)
-    .map((x) => ({ ...x, rate: rate(x.calls, totalUp) }));
-}
-
-/**
- * Árbol oficial de "no venta" — Hogar (NO VENTA/LLAMADA DE SERVICIO/
- * INCONSISTENCIA, TIP-004..TIP-020) y TyT (mismas 3 categorías pero árbol
- * distinto, TIP-004..TIP-014 — ver aware.tipmap.js). Cada campaña se
- * clasifica con SU PROPIO árbol/alias (matchClaroAsesor / matchClaroAsesorTyt)
- * para no mezclar un TIP-004 de Hogar con el TIP-004 de TyT (mismo código,
- * significado distinto). Si el alcance incluye ambas campañas (admin sin
- * scope), los buckets se namespacean por campaña para no chocar — el label
- * de cada árbol ya es autodescriptivo, así que en el front se ven como
- * ítems separados sin necesidad de UI especial.
- * Lo que no matchea ningún alias conocido, o no trae motivo_rechazo_texto,
- * cae en "SIN CLASIFICAR" — así los % siempre suman ~100% del total "no venta".
- */
-async function noVentaArbolFor(proyectoIds, from, to, totalUn) {
-  const campaigns = [];
-  if (proyectoIds.includes(12)) campaigns.push({ campana: 'HOGAR', queues: [7, 9], matcher: matchClaroAsesor });
-  if (proyectoIds.includes(13)) campaigns.push({ campana: 'TYT', queues: [10, 11], matcher: matchClaroAsesorTyt });
-  if (!campaigns.length || !totalUn) return { categorias: [], sin_clasificar: null };
-
-  const multi = campaigns.length > 1;
-  const buckets = new Map(); // key -> { tip, categoria, label, calls }
-  let clasificados = 0;
-  let sinClasificar = 0;
-
-  for (const c of campaigns) {
-    const rows = await awareQuery(
-      `SELECT trim(upper(regexp_replace(rl.json_data->>'motivo_rechazo_texto', '\\s+', ' ', 'g'))) AS motivo,
-              COUNT(*)::int AS n
-       FROM registro_llamada rl
-       WHERE rl.proyecto_id = ANY($1::int[]) AND rl.registro_llamada_fecha BETWEEN $2 AND $3
-         AND rl.nomenclatura_id = 'UN'
-         AND NULLIF(TRIM(rl.json_data->>'motivo_rechazo_texto'), '') IS NOT NULL
-       GROUP BY 1`,
-      [c.queues, from, to]
-    );
-    for (const row of rows) {
-      const n = num(row.n);
-      const hit = c.matcher(row.motivo);
-      if (hit && hit.categoria !== 'VENTA EXITOSA') {
-        clasificados += n;
-        const key = multi ? `${c.campana}:${hit.tip}` : hit.tip;
-        const e = buckets.get(key) || { tip: hit.tip, categoria: hit.categoria, label: hit.label, calls: 0 };
-        e.calls += n;
-        buckets.set(key, e);
-      } else {
-        // Texto que no matchea ningún TIP-XXX de "no venta" conocido, o que
-        // matcheó por error uno de "venta exitosa" (dato mal cargado por el
-        // asesor en una llamada UN, pasa en la práctica).
-        sinClasificar += n;
-      }
-    }
-  }
-  // UN sin motivo_rechazo_texto en absoluto (el heurístico bot→asesor tiene
-  // un desfase de ~0.1% frente al conteo directo — se acota con max(0,·)).
-  sinClasificar += Math.max(0, totalUn - clasificados - sinClasificar);
-
-  const porCategoria = new Map();
-  for (const b of buckets.values()) {
-    const list = porCategoria.get(b.categoria) || [];
-    list.push({ tip: b.tip, label: b.label, calls: b.calls, rate: rate(b.calls, totalUn) });
-    porCategoria.set(b.categoria, list);
-  }
-  const ORDEN = ['NO VENTA', 'LLAMADA DE SERVICIO', 'INCONSISTENCIA'];
-  const categorias = ORDEN.filter((c) => porCategoria.has(c)).map((c) => ({
-    categoria: c,
-    items: porCategoria.get(c).sort((a, b) => b.calls - a.calls),
-  }));
-
-  return {
-    categorias,
-    sin_clasificar: sinClasificar > 0 ? { calls: sinClasificar, rate: rate(sinClasificar, totalUn) } : null,
-  };
-}
-
 /** Embudo de negocio completo: transferencia → atendida → tipificación del asesor. */
 export function getHumanOutcomes(f = {}) {
   const r = resolveFilters(f);
   return cached(key('human-outcomes', r), 300000, async () => {
-    const rows = await awareQuery(
-      `SELECT tc.nomenclatura_id AS cod,
-              tc.nomenclatura_nombre AS nombre,
-              tc.contacto_efectivo AS efectivo,
-              COUNT(*)::int AS n
-       FROM v_voicebot_result v ${HUMAN_MATCH_TIP}
-       LEFT JOIN tipo_contacto tc ON tc.nomenclatura_id = h.nom
-       WHERE v.proyecto_id = ANY($1::int[]) AND v.fecha BETWEEN $2 AND $3
-         AND v.hangup_reason = 'call_transfer'
-       GROUP BY 1, 2, 3`,
-      baseParams(r)
-    );
-    let transfers = 0;
-    let atendidas = 0;
-    let up = 0;
-    let un = 0;
-    let efectivas = 0;
-    const tip = [];
-    for (const x of rows) {
-      const n = num(x.n);
-      transfers += n;
-      if (x.cod) {
-        atendidas += n;
-        if (x.cod === 'UP') up += n;
-        if (x.cod === 'UN') un += n;
-        if (x.efectivo === 'Contacto Efectivo') efectivas += n;
-        const nombre = TIP_RENAME[x.cod] || x.nombre || TIP_LABEL[x.cod] || x.cod;
-        tip.push({ cod: x.cod, nombre, efectivo: x.efectivo, calls: n });
-      }
-    }
-    tip.sort((a, b) => b.calls - a.calls);
-    // "Otros resultados": códigos de tipo_contacto que quedan FUERA del árbol
-    // oficial de Claro (FER/CFA/VLL/DME/EO/ABN/NC/ND/ERC/FS/GRB/TF/TO) — no
-    // son ni venta exitosa ni no venta, son intentos que no lograron contacto
-    // real. UP/UN ya se desglosan aparte (venta_detalle/no_venta_arbol).
-    const otros_resultados = tip.filter((t) => t.cod !== 'UP' && t.cod !== 'UN');
-    const [venta_detalle, no_venta_arbol] = await Promise.all([
-      ventaDetalleFor(r.proyectoIds, r.from, r.to, up),
-      noVentaArbolFor(r.proyectoIds, r.from, r.to, un),
+    const queues = humanQueuesFor(r.proyectoIds);
+    const [vRows, registroRows, tipoRows] = await Promise.all([
+      fetchVoicebotRows(r.proyectoIds, r.from, r.to),
+      fetchRegistroRows(queues, r.from, r.to),
+      fetchTipoContacto(),
     ]);
+    const registroIdx = buildHumanMatchIndex(registroRows);
+    const tipoMap = new Map(tipoRows.map((t) => [t.nomenclatura_id, t]));
+    const main = aggregateHumanOutcomesMain(vRows, registroIdx, tipoMap);
+
+    const [ventaRows, noVentaCampaignRows] = await Promise.all([
+      fetchVentaDetalleRows(queues, r.from, r.to, main.up),
+      fetchNoVentaCampaignRows(r.proyectoIds, r.from, r.to, main.un),
+    ]);
+    const venta_detalle = aggregateVentaDetalle(ventaRows, main.up);
+    const no_venta_arbol = aggregateNoVentaArbol(noVentaCampaignRows, main.un);
+
     return {
       range: { from: r.from, to: r.to },
-      transfers,
-      atendidas,
-      sin_atender: transfers - atendidas,
-      atendidas_rate: rate(atendidas, transfers),
-      util_positivo: up,
-      util_negativo: un,
-      conversion_rate: rate(up, atendidas), // UP sobre lo atendido
-      efectivo_rate: rate(efectivas, atendidas),
-      tipificaciones: tip,
-      otros_resultados,
+      transfers: main.transfers,
+      atendidas: main.atendidas,
+      sin_atender: main.transfers - main.atendidas,
+      atendidas_rate: rate(main.atendidas, main.transfers),
+      util_positivo: main.up,
+      util_negativo: main.un,
+      conversion_rate: rate(main.up, main.atendidas), // UP sobre lo atendido
+      efectivo_rate: rate(main.efectivas, main.atendidas),
+      tipificaciones: main.tip,
+      otros_resultados: main.otros_resultados,
       // Subconjuntos de "venta exitosa"/"no venta" (no suman aparte del total
       // UP/UN) — % es sobre util_positivo/util_negativo, no sobre atendidas.
       // venta_detalle trae Accesos/TV-Voz/Adicionales en Hogar y Terminales/
