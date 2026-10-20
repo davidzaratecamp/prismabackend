@@ -347,6 +347,38 @@ export function aggregateSofiaTipificacion(rows) {
   };
 }
 
+// Motivos de colgado que tienen su propia tarjeta KPI en Resumen — a pedido
+// del usuario 2026-10-20: cada una debe mostrar también el desglose por
+// tipificación IA de SOFIA, no solo el total (la tarjeta "Tipificación IA de
+// SOFIA" es la distribución general, mezclando los 4 motivos).
+const HANGUP_REASONS_FOR_TIP_BREAKDOWN = ['user_hangup', 'agent_hangup', 'inactivity', 'call_transfer'];
+
+/**
+ * getOverview — desglose de tipificación IA de SOFIA, PERO separado por
+ * motivo de colgado (user_hangup/agent_hangup/inactivity/call_transfer).
+ * El `rate` de cada fila es relativo al total de ESE motivo (ej. "CLIENTE
+ * CUELGA IA: 795 (27%)" → 27% de las llamadas que colgó el cliente, no del
+ * total general) — reutiliza aggregateSofiaTipificacion tal cual, porque ya
+ * calcula el `rate` sobre las filas que se le pasen.
+ */
+export function aggregateTipificacionByReason(rows) {
+  const groups = new Map();
+  for (const row of rows) {
+    if (!HANGUP_REASONS_FOR_TIP_BREAKDOWN.includes(row.hangup_reason)) continue;
+    let arr = groups.get(row.hangup_reason);
+    if (!arr) {
+      arr = [];
+      groups.set(row.hangup_reason, arr);
+    }
+    arr.push(row);
+  }
+  const out = {};
+  for (const reason of HANGUP_REASONS_FOR_TIP_BREAKDOWN) {
+    out[reason] = aggregateSofiaTipificacion(groups.get(reason) || []).rows.filter((r) => r.calls > 0);
+  }
+  return out;
+}
+
 function hourOf(hora) {
   if (!hora) return null;
   return Number(String(hora).slice(0, 2));

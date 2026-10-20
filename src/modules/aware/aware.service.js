@@ -24,6 +24,7 @@ import {
   aggregateVentaDetalle,
   fetchNoVentaCampaignRows,
   aggregateNoVentaArbol,
+  aggregateTipificacionByReason,
   aggregateVolumeByHour,
   aggregateHeatmap,
   aggregateHangupByDay,
@@ -103,7 +104,12 @@ export function getOverview(f = {}) {
     // Híbrido 2026-10-20: hoy sale de Aware en vivo, antes de hoy del espejo
     // MySQL (ver aware.hybrid.js) — agregación en JS sobre el array combinado.
     const rows = await fetchVoicebotRows(r.proyectoIds, r.from, r.to);
-    return aggregateOverview(rows, { from: r.from, to: r.to });
+    return {
+      ...aggregateOverview(rows, { from: r.from, to: r.to }),
+      // A pedido del usuario 2026-10-20: cada motivo de colgado con tarjeta
+      // propia en Resumen también muestra su desglose por tipificación IA.
+      tipificacion_by_reason: aggregateTipificacionByReason(rows),
+    };
   });
 }
 
