@@ -10,6 +10,7 @@ import {
   DID_BY_CDR_CALL_ID,
 } from './aware.db.js';
 import { cached } from './aware.cache.js';
+import { fetchVoicebotRows, aggregateOverview } from './aware.hybrid.js';
 import { db } from '../../db/knex.js'; // MySQL (prisma_db) — sólo para el snapshot de VoxPro
 import { normTipIA, TIP_IA_VALUES, matchClaroAsesor, matchClaroAsesorTyt } from './aware.tipmap.js';
 import { env } from '../../config/env.js';
@@ -61,50 +62,10 @@ export const baseParams = (r) => [r.proyectoIds, r.from, r.to];
 export function getOverview(f = {}) {
   const r = resolveFilters(f);
   return cached(key('overview', r), 60000, async () => {
-    const [row] = await awareQuery(
-      `SELECT
-         COUNT(*)::int AS total,
-         COUNT(*) FILTER (WHERE hangup_reason = 'call_transfer')::int AS transfer,
-         COUNT(*) FILTER (WHERE hangup_reason = 'user_hangup')::int  AS user_hangup,
-         COUNT(*) FILTER (WHERE hangup_reason = 'agent_hangup')::int AS agent_hangup,
-         COUNT(*) FILTER (WHERE hangup_reason = 'inactivity')::int   AS inactivity,
-         COALESCE(ROUND(AVG(duracion)), 0)::int AS avg_dur,
-         COALESCE(PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY duracion), 0)::int AS p50_dur,
-         COALESCE(PERCENTILE_CONT(0.9) WITHIN GROUP (ORDER BY duracion), 0)::int AS p90_dur,
-         COUNT(*) FILTER (WHERE call_analysis->>'user_sentiment' = 'Positive')::int AS pos,
-         COUNT(*) FILTER (WHERE call_analysis->>'user_sentiment' = 'Negative')::int AS neg,
-         COUNT(*) FILTER (WHERE call_analysis->>'user_sentiment' = 'Neutral')::int  AS neu,
-         COUNT(*) FILTER (WHERE call_analysis->>'user_sentiment' IN ('Positive','Negative','Neutral'))::int AS sent_total,
-         COUNT(*) FILTER (WHERE call_analysis->>'call_successful' = 'true')::int AS ok,
-         COUNT(*) FILTER (WHERE call_analysis->>'call_successful' IN ('true','false'))::int AS analyzed
-       FROM v_voicebot_result
-       WHERE ${BASE_WHERE}`,
-      baseParams(r)
-    );
-
-    const total = num(row.total);
-    return {
-      range: { from: r.from, to: r.to },
-      total_calls: total,
-      transfers: num(row.transfer),
-      transfer_rate: rate(row.transfer, total),
-      user_hangup: num(row.user_hangup),
-      user_hangup_rate: rate(row.user_hangup, total),
-      agent_hangup: num(row.agent_hangup),
-      agent_hangup_rate: rate(row.agent_hangup, total),
-      inactivity: num(row.inactivity),
-      inactivity_rate: rate(row.inactivity, total),
-      avg_duration_seconds: num(row.avg_dur),
-      p50_duration_seconds: num(row.p50_dur),
-      p90_duration_seconds: num(row.p90_dur),
-      positive: num(row.pos),
-      negative: num(row.neg),
-      neutral: num(row.neu),
-      positive_rate: rate(row.pos, row.sent_total),
-      negative_rate: rate(row.neg, row.sent_total),
-      successful: num(row.ok),
-      success_rate: rate(row.ok, row.analyzed),
-    };
+    // Híbrido 2026-10-20: hoy sale de Aware en vivo, antes de hoy del espejo
+    // MySQL (ver aware.hybrid.js) — agregación en JS sobre el array combinado.
+    const rows = await fetchVoicebotRows(r.proyectoIds, r.from, r.to);
+    return aggregateOverview(rows, { from: r.from, to: r.to });
   });
 }
 
