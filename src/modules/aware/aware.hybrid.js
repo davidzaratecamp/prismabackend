@@ -700,7 +700,11 @@ export function aggregateHumanOutcomesMain(vRows, registroIndex, tipoContactoMap
     efectivo: g.efectivo,
     calls: g.n,
   }));
-  tip.sort((a, b) => b.calls - a.calls);
+  // Desempate alfabético por cod: la consulta SQL original no fijaba un orden
+  // para empates (dependía del plan de Postgres, ya de por sí no
+  // determinista) — acá sí se fija, para que el orden no cambie entre
+  // corridas solo por venir de una fuente u otra.
+  tip.sort((a, b) => b.calls - a.calls || a.cod.localeCompare(b.cod));
   const otros_resultados = tip.filter((t) => t.cod !== 'UP' && t.cod !== 'UN');
   return { transfers, atendidas, up, un, efectivas, tip, otros_resultados };
 }
