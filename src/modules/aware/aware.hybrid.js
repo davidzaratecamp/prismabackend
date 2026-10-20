@@ -445,6 +445,76 @@ export function aggregateFunnel(vRows, registroIndex, range) {
   };
 }
 
+/** botStatsFor (getPeriodComparison) — versión liviana de aggregateOverview. */
+export function aggregateBotStats(rows, from, to) {
+  let total = 0;
+  let transfer = 0;
+  let user_hangup = 0;
+  let agent_hangup = 0;
+  let inactivity = 0;
+  let pos = 0;
+  let sentTotal = 0;
+  let ok = 0;
+  let analyzed = 0;
+  const durations = [];
+  for (const row of rows) {
+    total++;
+    if (row.hangup_reason === 'call_transfer') transfer++;
+    else if (row.hangup_reason === 'user_hangup') user_hangup++;
+    else if (row.hangup_reason === 'agent_hangup') agent_hangup++;
+    else if (row.hangup_reason === 'inactivity') inactivity++;
+    if (row.duracion != null) durations.push(Number(row.duracion));
+    const ca = row.call_analysis || {};
+    if (ca.user_sentiment === 'Positive') {
+      pos++;
+      sentTotal++;
+    } else if (ca.user_sentiment === 'Negative' || ca.user_sentiment === 'Neutral') {
+      sentTotal++;
+    }
+    if (ca.call_successful === true || ca.call_successful === 'true') {
+      ok++;
+      analyzed++;
+    } else if (ca.call_successful === false || ca.call_successful === 'false') {
+      analyzed++;
+    }
+  }
+  const avg_dur = durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : 0;
+  return {
+    from,
+    to,
+    total_calls: total,
+    transfer_rate: rate(transfer, total),
+    user_hangup_rate: rate(user_hangup, total),
+    agent_hangup_rate: rate(agent_hangup, total),
+    inactivity_rate: rate(inactivity, total),
+    avg_duration_seconds: avg_dur,
+    positive_rate: rate(pos, sentTotal),
+    success_rate: rate(ok, analyzed),
+  };
+}
+
+/** humanStatsFor (getPeriodComparison) — conversión real (asesor humano). */
+export function aggregateHumanStats(vRows, registroIndex) {
+  let transfers = 0;
+  let atendidas = 0;
+  let up = 0;
+  for (const v of vRows) {
+    if (v.hangup_reason !== 'call_transfer') continue;
+    transfers++;
+    const hm = matchHuman(v, registroIndex);
+    if (hm) {
+      atendidas++;
+      if (hm.nom === 'UP') up++;
+    }
+  }
+  return {
+    transfers,
+    atendidas,
+    atendidas_rate: rate(atendidas, transfers),
+    conversion_rate: rate(up, atendidas),
+  };
+}
+
 /* ───────────────────────── cdr_custom (DID real por llamada, Hogar) ───────────────────────── */
 
 function timeToSeconds(hhmmss) {
