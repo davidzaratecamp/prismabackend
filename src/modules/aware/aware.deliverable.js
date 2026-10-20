@@ -30,8 +30,20 @@ import {
 } from './aware.db.js';
 import { cached } from './aware.cache.js';
 import { db } from '../../db/knex.js'; // MySQL — sólo para el DID (retell_calls)
-import { resolveFilters, baseParams, num } from './aware.service.js';
+import { resolveFilters, num } from './aware.service.js';
 import { mapTip, normTipIA, TIP_IA_VALUES } from './aware.tipmap.js';
+import {
+  fetchVoicebotRows,
+  fetchRegistroRowsDeliverable,
+  fetchCdrRows,
+  fetchTipoContacto,
+  buildDeliverableMatchIndex,
+  buildCdrMatchIndex,
+  buildDeliverableRows,
+  deliverableRowMatches,
+  fetchTranscriptMeta,
+  humanQueuesFor,
+} from './aware.hybrid.js';
 
 /* LATERAL: continuación humana de la transferencia + su tipificación. Extiende el
    HUMAN_MATCH de aware.service.js con nombre de asesor, duraciones y audiofile.
@@ -100,75 +112,49 @@ const DELIV_LATERAL = `
 
 const ESTADOS = ['transferido', 'abandonado', 'ia'];
 const VENTAS = ['si', 'no'];
-const TIP_IA_CODE = "v.call_analysis->'custom_analysis_data'->>'CODIGO_TIPIFICACIONIA'";
 
-/** Traduce los filtros opcionales del entregable a condiciones SQL. */
-function extraConds({ estado, venta, tip, tipIa, phone }, params) {
-  const extra = [];
-  if (phone) {
-    params.push(`%${phone}%`);
-    extra.push(`v.telefono ILIKE $${params.length}`);
-  }
-  if (estado === 'transferido') {
-    extra.push(`v.hangup_reason = 'call_transfer' AND h.rid IS NOT NULL AND h.nom IS DISTINCT FROM 'ABN'`);
-  } else if (estado === 'abandonado') {
-    extra.push(`v.hangup_reason = 'call_transfer' AND (h.rid IS NULL OR h.nom = 'ABN')`);
-  } else if (estado === 'ia') {
-    extra.push(`v.hangup_reason IS DISTINCT FROM 'call_transfer'`);
-  }
-  if (venta === 'si') extra.push(`h.nom = 'UP'`);
-  else if (venta === 'no') extra.push(`h.nom IS DISTINCT FROM 'UP'`);
-  if (tip) {
-    params.push(tip);
-    extra.push(`h.nom = $${params.length}`);
-  }
-  if (tipIa === '__none__') {
-    extra.push(`NULLIF(TRIM(${TIP_IA_CODE}), '') IS NULL`);
-  } else if (tipIa) {
-    // SOFIA suele escribir el valor oficial tal cual; match exacto (case-insensitive)
-    params.push(tipIa);
-    extra.push(`lower(TRIM(${TIP_IA_CODE})) = lower($${params.length})`);
-  }
-  return extra;
-}
+/**
+ * Listado del entregable — versión híbrida (2026-10-20): hoy sale de Aware en
+ * vivo, antes de hoy del espejo MySQL (misma lógica que el resto del módulo,
+ * ver aware.hybrid.js). Se trae el rango completo, se arma cada fila en JS
+ * (buildDeliverableRows, reemplaza DELIV_LATERAL), se filtra/ordena/pagina en
+ * JS (deliverableRowMatches reemplaza extraConds) y, solo para las filas de
+ * la página pedida, se completan turnos/transcripción pidiéndolos a Aware
+ * (fetchTranscriptMeta — el espejo no guarda transcript_object).
+ */
+export async function runQuery(r, { estado, venta, tip, tipIa, phone, limit, offset, withTranscript }) {
+  const queues = humanQueuesFor(r.proyectoIds);
+  const [vRows, registroRows, cdrRows, tipoRows] = await Promise.all([
+    fetchVoicebotRows(r.proyectoIds, r.from, r.to),
+    fetchRegistroRowsDeliverable(queues, r.from, r.to),
+    fetchCdrRows(r.from, r.to),
+    fetchTipoContacto(),
+  ]);
+  const registroIdx = buildDeliverableMatchIndex(registroRows);
+  const cdrIdx = buildCdrMatchIndex(cdrRows);
+  const tipoMap = new Map(tipoRows.map((t) => [t.nomenclatura_id, t]));
+  const allRows = buildDeliverableRows(vRows, registroIdx, cdrIdx, tipoMap);
 
-async function runQuery(r, { estado, venta, tip, tipIa, phone, limit, offset, withTranscript }) {
-  const params = baseParams(r); // [proyectoIds, from, to]
-  const extra = extraConds({ estado, venta, tip, tipIa, phone }, params);
-  const where = [
-    'v.proyecto_id = ANY($1::int[])',
-    'v.fecha BETWEEN $2 AND $3',
-    ...extra,
-  ].join(' AND ');
+  const filtered = allRows.filter((x) => deliverableRowMatches(x, { estado, venta, tip, tipIa, phone }));
+  filtered.sort((a, b) => {
+    if (a.fecha !== b.fecha) return a.fecha < b.fecha ? 1 : -1;
+    if (a.hora !== b.hora) return a.hora < b.hora ? 1 : -1;
+    return 0;
+  });
+  const total = filtered.length;
+  const rows = filtered.slice(offset, offset + limit);
 
-  params.push(limit);
-  const lp = params.length;
-  params.push(offset);
-  const op = params.length;
-
-  const rows = await awareQuery(
-    `SELECT v.call_id, v.proyecto_id, v.fecha::text AS fecha, v.hora::text AS hora,
-            v.hangup_reason, v.duracion AS dur_ia, v.audiofile AS ia_audiofile, v.telefono,
-            v.call_analysis->>'call_successful' AS ia_ok,
-            v.call_analysis->'custom_analysis_data'->>'TIPO_SERVICIO' AS tipo_servicio,
-            v.call_analysis->'custom_analysis_data'->>'CODIGO_TIPIFICACIONIA' AS tip_ia_raw,
-            COALESCE(jsonb_array_length(v.transcript_object), 0)::int AS ia_turnos,
-            ${withTranscript ? 'v.transcript_object,' : ''}
-            h.rid, h.h_proy, h.asesor, h.time_tmo, h.time_speaking, h.rl_audiofile, h.nom, h.rl_uniqueid, h.motivo_rechazo, h.dc_accesos, h.dc_tv_voz, h.dc_adicionales, h.dc_terminales, h.dc_tecnologia, h.dc_claro_up, cdr.did_raw,
-            tc.nomenclatura_nombre AS tc_nombre, tc.contacto_efectivo AS tc_efectivo,
-            COUNT(*) OVER()::int AS total_rows
-     FROM v_voicebot_result v
-     ${DELIV_LATERAL}
-     WHERE ${where}
-     ORDER BY v.fecha DESC, v.hora DESC
-     LIMIT $${lp} OFFSET $${op}`,
-    params
-  );
-  return { rows, total: rows.length ? num(rows[0].total_rows) : 0 };
+  const meta = await fetchTranscriptMeta(rows.map((x) => x.call_id), { withText: withTranscript });
+  for (const x of rows) {
+    const m = meta.get(x.call_id);
+    x.ia_turnos = m ? m.turnos : 0;
+    if (withTranscript) x.transcript_object = m ? m.transcript_object : null;
+  }
+  return { rows, total };
 }
 
 /** DID de cada llamada desde retell_calls (MySQL local). */
-async function retellDids(callIds) {
+export async function retellDids(callIds) {
   const map = new Map();
   if (!callIds.length) return map;
   try {
@@ -213,7 +199,7 @@ function gestionIA(hangup, ok) {
   }
 }
 
-function mapRow(x, retellMap) {
+export function mapRow(x, retellMap) {
   const estado = estadoOf(x);
   const transferido = estado === 'Transferido';
   const durIa = x.dur_ia == null ? null : num(x.dur_ia);
@@ -289,7 +275,7 @@ function mapRow(x, retellMap) {
   };
 }
 
-function normFilters(f = {}) {
+export function normFilters(f = {}) {
   const tipIaIn = f.tipificacionIa ? String(f.tipificacionIa) : null;
   return {
     estado: ESTADOS.includes(f.estado) ? f.estado : null,

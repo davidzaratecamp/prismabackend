@@ -69,7 +69,17 @@ function normalizeJson(v) {
   return v;
 }
 
-const VOICEBOT_COLS = ['proyecto_id', 'fecha', 'hora', 'hangup_reason', 'duracion', 'call_analysis', 'telefono'];
+const VOICEBOT_COLS = [
+  'call_id',
+  'proyecto_id',
+  'fecha',
+  'hora',
+  'hangup_reason',
+  'duracion',
+  'audiofile',
+  'call_analysis',
+  'telefono',
+];
 
 async function fetchVoicebotLive(proyectoIds, from, to) {
   return awareQuery(
@@ -829,4 +839,221 @@ export function aggregateNoVentaArbol(campaignRows, totalUn) {
     categorias,
     sin_clasificar: sinClasificar > 0 ? { calls: sinClasificar, rate: rate(sinClasificar, totalUn) } : null,
   };
+}
+
+/* ───────────────────────── entregable (Consolidado) ───────────────────────── */
+
+/** Como nestedPath pero SIN trim/NULLIF — para los campos del entregable que
+ *  en el SQL original se extraen crudos (TIPO_SERVICIO, CODIGO_TIPIFICACIONIA
+ *  en runQuery) y el recorte de vacíos lo hace mapRow() en JS después. */
+function rawNestedPath(obj, ...keys) {
+  let cur = obj;
+  for (const k of keys) {
+    if (cur == null) return null;
+    cur = cur[k];
+  }
+  return cur === undefined ? null : cur;
+}
+
+const REGISTRO_COLS_DELIV = [
+  'proyecto_id',
+  'registro_llamada_fono',
+  'registro_llamada_fecha',
+  'registro_llamada_hora',
+  'time_tmo',
+  'time_speaking',
+  'registro_llamada_id',
+  'nomenclatura_id',
+  'audiofile',
+  'uniqueid',
+  'json_data',
+];
+
+async function fetchRegistroLiveDeliv(queueIds, from, to) {
+  if (!queueIds.length) return [];
+  return awareQuery(
+    `SELECT ${REGISTRO_COLS_DELIV.join(', ')}
+     FROM registro_llamada
+     WHERE proyecto_id = ANY($1::int[]) AND registro_llamada_fecha BETWEEN $2 AND $3 AND time_tmo > 0`,
+    [queueIds, from, to]
+  );
+}
+async function fetchRegistroMirrorDeliv(queueIds, from, to) {
+  if (!queueIds.length) return [];
+  const rows = await db('aware_mirror_registro_llamada')
+    .select(REGISTRO_COLS_DELIV)
+    .whereIn('proyecto_id', queueIds)
+    .whereBetween('registro_llamada_fecha', [from, to])
+    .where('time_tmo', '>', 0);
+  return rows.map((r) => ({ ...r, json_data: normalizeJson(r.json_data) }));
+}
+/** registro_llamada con TODOS los campos que necesita el entregable (asesor,
+ *  audiofile, motivo_rechazo, detalle de venta) — versión "completa" de
+ *  fetchRegistroRows, solo para el entregable (las demás pantallas no
+ *  necesitan json_data y se quedan con la versión liviana). */
+export async function fetchRegistroRowsDeliverable(queueIds, from, to) {
+  const { hist, live } = splitRange(from, to);
+  const [histRows, liveRows] = await Promise.all([
+    hist ? fetchRegistroMirrorDeliv(queueIds, hist.from, hist.to) : Promise.resolve([]),
+    live ? fetchRegistroLiveDeliv(queueIds, live.from, live.to) : Promise.resolve([]),
+  ]);
+  return histRows.concat(liveRows);
+}
+
+function datoContactoValor(dc, labelName) {
+  if (!dc || typeof dc !== 'object') return null;
+  for (const v of Object.values(dc)) {
+    if (v && v.label_name === labelName) return v.valor ?? null;
+  }
+  return null;
+}
+
+/** Índice telefono+fecha → candidatos de registro_llamada CON todos los
+ *  campos del entregable (no solo rid/nom/proyecto_id como matchHuman) —
+ *  reutiliza matchHuman(vRow, index) tal cual, que solo mira .hora y
+ *  .proyecto_id de cada candidato. */
+export function buildDeliverableMatchIndex(registroRows) {
+  const map = new Map();
+  for (const r of registroRows) {
+    const k = `${r.registro_llamada_fono}|${r.registro_llamada_fecha}`;
+    let arr = map.get(k);
+    if (!arr) {
+      arr = [];
+      map.set(k, arr);
+    }
+    const jd = r.json_data || {};
+    const asesor = typeof jd.agente === 'string' ? jd.agente.trim() || null : null;
+    const motivo = typeof jd.motivo_rechazo_texto === 'string' ? jd.motivo_rechazo_texto.trim() || null : null;
+    const dc = jd.datos_contacto;
+    const rlAudiofile =
+      r.audiofile || `${String(r.registro_llamada_fecha).replace(/-/g, '/')}/Q-${r.registro_llamada_fono}-${r.uniqueid}`;
+    arr.push({
+      hora: r.registro_llamada_hora,
+      proyecto_id: Number(r.proyecto_id),
+      rid: r.registro_llamada_id,
+      nom: r.nomenclatura_id,
+      asesor,
+      time_tmo: r.time_tmo,
+      time_speaking: r.time_speaking,
+      rl_audiofile: rlAudiofile,
+      rl_uniqueid: r.uniqueid,
+      motivo_rechazo: motivo,
+      dc_accesos: datoContactoValor(dc, 'ACCESOS (TRIPLE, DOBLE, SENCILLO CON @)'),
+      dc_tv_voz: datoContactoValor(dc, 'TV Y/O VOZ'),
+      dc_adicionales: datoContactoValor(dc, 'ADICIONALES'),
+      dc_terminales: datoContactoValor(dc, 'TERMINALES'),
+      dc_tecnologia: datoContactoValor(dc, 'TECNOLOGIA'),
+      dc_claro_up: datoContactoValor(dc, 'CLARO UP'),
+    });
+  }
+  for (const arr of map.values()) arr.sort((a, b) => (a.hora < b.hora ? -1 : a.hora > b.hora ? 1 : 0));
+  return map;
+}
+
+/**
+ * Arma, para cada fila de v_voicebot_result, el mismo objeto "x" que antes
+ * devolvía el SELECT con DELIV_LATERAL en aware.deliverable.js — para que
+ * mapRow() (sin cambios) lo siga consumiendo igual. `withTranscript` solo
+ * decide si se incluye transcript_object (ya presente en vRows si se pidió).
+ */
+export function buildDeliverableRows(vRows, registroIndex, cdrIndex, tipoContactoMap) {
+  const out = [];
+  for (const v of vRows) {
+    const hm = matchHuman(v, registroIndex);
+    const cdrCand = v.proyecto_id === 12 ? matchCdr(v, cdrIndex) : null;
+    const tipoInfo = hm && hm.nom ? tipoContactoMap.get(hm.nom) : null;
+    const ca = v.call_analysis || {};
+    out.push({
+      call_id: v.call_id,
+      proyecto_id: v.proyecto_id,
+      fecha: v.fecha,
+      hora: v.hora,
+      hangup_reason: v.hangup_reason,
+      dur_ia: v.duracion,
+      ia_audiofile: v.audiofile,
+      telefono: v.telefono,
+      ia_ok: ca.call_successful == null ? null : String(ca.call_successful),
+      tipo_servicio: rawNestedPath(ca, 'custom_analysis_data', 'TIPO_SERVICIO'),
+      tip_ia_raw: rawNestedPath(ca, 'custom_analysis_data', 'CODIGO_TIPIFICACIONIA'),
+      // turnos/transcript_object no están en vRows (el espejo no los guarda,
+      // ver fetchTranscriptMeta) — runQuery los completa después, solo para
+      // las filas de la página pedida.
+      ia_turnos: 0,
+      transcript_object: null,
+      rid: hm ? hm.rid : null,
+      h_proy: hm ? hm.proyecto_id : null,
+      asesor: hm ? hm.asesor : null,
+      time_tmo: hm ? hm.time_tmo : null,
+      time_speaking: hm ? hm.time_speaking : null,
+      rl_audiofile: hm ? hm.rl_audiofile : null,
+      nom: hm ? hm.nom : null,
+      rl_uniqueid: hm ? hm.rl_uniqueid : null,
+      motivo_rechazo: hm ? hm.motivo_rechazo : null,
+      dc_accesos: hm ? hm.dc_accesos : null,
+      dc_tv_voz: hm ? hm.dc_tv_voz : null,
+      dc_adicionales: hm ? hm.dc_adicionales : null,
+      dc_terminales: hm ? hm.dc_terminales : null,
+      dc_tecnologia: hm ? hm.dc_tecnologia : null,
+      dc_claro_up: hm ? hm.dc_claro_up : null,
+      did_raw: cdrCand ? cdrCand.call_id : null,
+      tc_nombre: tipoInfo ? tipoInfo.nomenclatura_nombre : null,
+      tc_efectivo: tipoInfo ? tipoInfo.contacto_efectivo : null,
+    });
+  }
+  return out;
+}
+
+/**
+ * Traduce los filtros opcionales del entregable (extraConds en
+ * aware.deliverable.js, versión SQL) a un predicado en JS sobre las filas
+ * que arma buildDeliverableRows.
+ */
+export function deliverableRowMatches(x, { estado, venta, tip, tipIa, phone }) {
+  if (phone && !(x.telefono && x.telefono.toLowerCase().includes(phone.toLowerCase()))) return false;
+  if (estado === 'transferido') {
+    if (!(x.hangup_reason === 'call_transfer' && x.rid != null && x.nom !== 'ABN')) return false;
+  } else if (estado === 'abandonado') {
+    if (!(x.hangup_reason === 'call_transfer' && (x.rid == null || x.nom === 'ABN'))) return false;
+  } else if (estado === 'ia') {
+    if (x.hangup_reason === 'call_transfer') return false;
+  }
+  if (venta === 'si') {
+    if (x.nom !== 'UP') return false;
+  } else if (venta === 'no') {
+    if (x.nom === 'UP') return false;
+  }
+  if (tip && x.nom !== tip) return false;
+  const tipIaRaw = x.tip_ia_raw && String(x.tip_ia_raw).trim() ? String(x.tip_ia_raw).trim() : null;
+  if (tipIa === '__none__') {
+    if (tipIaRaw) return false;
+  } else if (tipIa) {
+    if (!tipIaRaw || tipIaRaw.toLowerCase() !== tipIa.toLowerCase()) return false;
+  }
+  return true;
+}
+
+/**
+ * Metadatos de transcripción en vivo de Aware por call_id — a pedido del
+ * usuario 2026-10-20: el espejo no guarda la transcripción completa
+ * (demasiado pesada para sincronizar cada 15 min, ver aware.mirror.js), así
+ * que `transcripcion_ia_turnos` (siempre visible, incluso en el listado
+ * paginado) y el texto completo (solo al exportar) se piden a Aware aparte.
+ * `jsonb_array_length(transcript_object)` se calcula DEL LADO DE Postgres —
+ * por la red solo cruza un entero por fila, no el jsonb completo, así que
+ * no tiene el costo que sí tiene traer la columna cruda (ver aware.mirror.js).
+ * Si Aware no responde, se sigue mostrando/exportando el resto del entregable
+ * igual, con turnos en 0 y sin texto.
+ */
+export async function fetchTranscriptMeta(callIds, { withText = false } = {}) {
+  if (!callIds.length) return new Map();
+  try {
+    const cols = withText
+      ? "call_id, transcript_object, COALESCE(jsonb_array_length(transcript_object), 0)::int AS turnos"
+      : "call_id, COALESCE(jsonb_array_length(transcript_object), 0)::int AS turnos";
+    const rows = await awareQuery(`SELECT ${cols} FROM v_voicebot_result WHERE call_id = ANY($1::text[])`, [callIds]);
+    return new Map(rows.map((r) => [r.call_id, { turnos: r.turnos, transcript_object: r.transcript_object ?? null }]));
+  } catch (err) {
+    console.error('[aware.hybrid] no se pudo traer la transcripción de Aware (turnos/texto quedan vacíos):', err.message);
+    return new Map();
+  }
 }
