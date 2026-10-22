@@ -74,6 +74,26 @@ export function splitRange(from, to) {
   return { hist, live, today };
 }
 
+/**
+ * Envuelve el tramo "hoy" (Aware en vivo) de cada fetch híbrido: si Aware
+ * falla (contraseña rotada, caído, lo que sea — visto en producción
+ * 2026-10-22: la contraseña de `analista` cambió a una no conocida y
+ * awareQuery agotó los 4 candidatos), este tramo se resuelve vacío en vez
+ * de tumbar el Promise.all completo — así el tramo histórico (espejo, que sí
+ * respondió) se sigue mostrando en vez de dejar la pestaña cargando para
+ * siempre. Es exactamente la razón de ser del espejo: una caída de Aware ya
+ * no debe dejar el panel en blanco, ni siquiera para el día de hoy (solo
+ * falta ese día, no el resto).
+ */
+async function safeLive(promise, label) {
+  try {
+    return await promise;
+  } catch (err) {
+    console.error(`[aware.hybrid] Aware no respondió (${label}, tramo de hoy) — se sigue solo con el espejo:`, err.message);
+    return [];
+  }
+}
+
 function normalizeJson(v) {
   if (v == null) return null;
   if (typeof v === 'string') {
@@ -125,7 +145,7 @@ export async function fetchVoicebotRows(proyectoIds, from, to) {
     const { hist, live } = splitRange(from, to);
     const [histRows, liveRows] = await Promise.all([
       hist ? fetchVoicebotMirror(proyectoIds, hist.from, hist.to) : Promise.resolve([]),
-      live ? fetchVoicebotLive(proyectoIds, live.from, live.to) : Promise.resolve([]),
+      live ? safeLive(fetchVoicebotLive(proyectoIds, live.from, live.to), 'voicebot_result') : Promise.resolve([]),
     ]);
     return histRows.concat(liveRows);
   });
@@ -557,7 +577,7 @@ export async function fetchRegistroRows(queueIds, from, to) {
     const { hist, live } = splitRange(from, to);
     const [histRows, liveRows] = await Promise.all([
       hist ? fetchRegistroMirror(queueIds, hist.from, hist.to) : Promise.resolve([]),
-      live ? fetchRegistroLive(queueIds, live.from, live.to) : Promise.resolve([]),
+      live ? safeLive(fetchRegistroLive(queueIds, live.from, live.to), 'registro_llamada') : Promise.resolve([]),
     ]);
     return histRows.concat(liveRows);
   });
@@ -738,7 +758,7 @@ export async function fetchCdrRows(from, to) {
     const { hist, live } = splitRange(from, to);
     const [histRows, liveRows] = await Promise.all([
       hist ? fetchCdrMirror(hist.from, hist.to) : Promise.resolve([]),
-      live ? fetchCdrLive(live.from, live.to) : Promise.resolve([]),
+      live ? safeLive(fetchCdrLive(live.from, live.to), 'cdr_custom') : Promise.resolve([]),
     ]);
     return histRows.concat(liveRows);
   });
@@ -925,7 +945,7 @@ async function fetchRegistroUpUn(queueIds, from, to, nom) {
   const { hist, live } = splitRange(from, to);
   const [histRows, liveRows] = await Promise.all([
     hist ? fetchRegistroUpUnMirror(queueIds, hist.from, hist.to, nom) : Promise.resolve([]),
-    live ? fetchRegistroUpUnLive(queueIds, live.from, live.to, nom) : Promise.resolve([]),
+    live ? safeLive(fetchRegistroUpUnLive(queueIds, live.from, live.to, nom), 'registro_llamada_up_un') : Promise.resolve([]),
   ]);
   return histRows.concat(liveRows);
 }
@@ -1077,7 +1097,7 @@ export async function fetchRegistroRowsDeliverable(queueIds, from, to) {
     const { hist, live } = splitRange(from, to);
     const [histRows, liveRows] = await Promise.all([
       hist ? fetchRegistroMirrorDeliv(queueIds, hist.from, hist.to) : Promise.resolve([]),
-      live ? fetchRegistroLiveDeliv(queueIds, live.from, live.to) : Promise.resolve([]),
+      live ? safeLive(fetchRegistroLiveDeliv(queueIds, live.from, live.to), 'registro_llamada_deliv') : Promise.resolve([]),
     ]);
     return histRows.concat(liveRows);
   });
@@ -1530,7 +1550,7 @@ export async function fetchAgentRankingRows(queueIds, from, to) {
     const { hist, live } = splitRange(from, to);
     const [histRows, liveRows] = await Promise.all([
       hist ? fetchAgentRankingMirror(queueIds, hist.from, hist.to) : Promise.resolve([]),
-      live ? fetchAgentRankingLive(queueIds, live.from, live.to) : Promise.resolve([]),
+      live ? safeLive(fetchAgentRankingLive(queueIds, live.from, live.to), 'agent_ranking') : Promise.resolve([]),
     ]);
     return histRows.concat(liveRows);
   });
@@ -1584,7 +1604,7 @@ export async function fetchAbandonoRows(from, to) {
     const { hist, live } = splitRange(from, to);
     const [histRows, liveRows] = await Promise.all([
       hist ? fetchAbandonoMirror(hist.from, hist.to) : Promise.resolve([]),
-      live ? fetchAbandonoLive(live.from, live.to) : Promise.resolve([]),
+      live ? safeLive(fetchAbandonoLive(live.from, live.to), 'abandono') : Promise.resolve([]),
     ]);
     return histRows.concat(liveRows);
   });
