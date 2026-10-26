@@ -783,7 +783,14 @@ export async function fetchCdrRows(from, to) {
  * 3 días ~1 de cada 4 contestadas en la cola 3010 quedó sin tipificar). La
  * central (cdr_custom, contexto aware-cola-inbound) sí registra toda llamada
  * contestada. La campaña sale del DID (call_id), no de proyecto_id/cola: en
- * las no tipificadas esos dos vienen vacíos (proyecto_id = 0). */
+ * las no tipificadas esos dos vienen vacíos (proyecto_id = 0).
+ * OJO: disposition = 'ANSWERED' NO basta — la central "contesta" toda llamada
+ * apenas entra a la cola (música de espera), aunque el cliente cuelgue
+ * esperando. Lo que dice si hubo asesor es queue_status: COMPLETECALLER /
+ * COMPLETEAGENT = hubo conversación (colgó el cliente / el asesor); ABANDON =
+ * colgó en espera (verificado 2026-10-23 TyT: 9 de 40 "sin tipificar" eran
+ * ABANDON). */
+const QUEUE_ATTENDED_STATUS = ['COMPLETECALLER', 'COMPLETEAGENT'];
 const QUEUE_DIDS_BY_BOT = {
   12: HOGAR_CDR_DIDS,
   13: ['011576019184507', '011576019193216'],
@@ -798,8 +805,8 @@ async function fetchQueueAnsweredLive(from, to) {
     `SELECT telefono, fecha, hora, call_id
      FROM cdr_custom
      WHERE fecha BETWEEN $1 AND $2 AND call_id = ANY($3::text[])
-       AND context = 'aware-cola-inbound' AND disposition = 'ANSWERED' AND billsec > 0`,
-    [from, to, ALL_QUEUE_DIDS]
+       AND context = 'aware-cola-inbound' AND queue_status = ANY($4::text[])`,
+    [from, to, ALL_QUEUE_DIDS, QUEUE_ATTENDED_STATUS]
   );
 }
 
@@ -808,11 +815,11 @@ async function fetchQueueAnsweredMirror(from, to) {
     .select('telefono', 'fecha', 'hora', 'call_id')
     .whereBetween('fecha', [from, to])
     .whereIn('call_id', ALL_QUEUE_DIDS)
-    .where({ context: 'aware-cola-inbound', disposition: 'ANSWERED' })
-    .where('billsec', '>', 0);
+    .where({ context: 'aware-cola-inbound' })
+    .whereIn('queue_status', QUEUE_ATTENDED_STATUS);
 }
 
-/** Llamadas contestadas en las colas humanas de Hogar/TyT, Aware (hoy) + espejo (resto). */
+/** Llamadas atendidas por un asesor en las colas de Hogar/TyT, Aware (hoy) + espejo (resto). */
 export async function fetchQueueAnsweredRows(from, to) {
   return cached(fetchKey('queue-answered', from, to), FETCH_TTL_MS, async () => {
     const { hist, live } = splitRange(from, to);
