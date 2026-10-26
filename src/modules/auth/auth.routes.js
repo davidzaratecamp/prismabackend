@@ -31,6 +31,7 @@ const publicUser = (u) => ({
   area_id: u.area_id,
   aware_scope: u.aware_scope ?? null,
   aware_quality: !!u.aware_quality,
+  aware_recorrido: !!u.aware_recorrido,
   aware_view: u.aware_view || 'full',
   admin_no_create: !!u.admin_no_create,
   retell_scope: u.retell_scope ?? null,

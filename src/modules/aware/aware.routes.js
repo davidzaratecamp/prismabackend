@@ -45,6 +45,14 @@ router.use((req, _res, next) => {
   next(new HttpError(403, 'Vista restringida a Resumen y Consolidado'));
 });
 
+// Pestaña "Recorrido": solo con el permiso `aware_recorrido` (ni el rol admin
+// lo trae por defecto). Estos endpoints no los usa ninguna otra pestaña.
+const RECORRIDO_ONLY = /^\/analytics\/(funnel|not-attended-by-day|repeat-callers|transfers-attended|by-project)$/;
+router.use((req, _res, next) => {
+  if (!RECORRIDO_ONLY.test(req.path) || req.user?.aware_recorrido) return next();
+  next(new HttpError(403, 'Sin acceso a la pestaña Recorrido'));
+});
+
 // Todo lo que consulta Aware exige la conexión configurada.
 function ensureConfigured(_req, _res, next) {
   if (!isAwareConfigured()) {

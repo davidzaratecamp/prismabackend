@@ -11,7 +11,7 @@ import { logActivity } from '../../utils/activity.js';
 const router = Router();
 router.use(requireAuth);
 
-const USER_COLS = ['id', 'name', 'email', 'role', 'area_id', 'aware_scope', 'aware_quality', 'aware_view', 'admin_no_create', 'retell_scope', 'avatar_color', 'is_active', 'created_at'];
+const USER_COLS = ['id', 'name', 'email', 'role', 'area_id', 'aware_scope', 'aware_quality', 'aware_recorrido', 'aware_view', 'admin_no_create', 'retell_scope', 'avatar_color', 'is_active', 'created_at'];
 
 /** 12 = Claro Hogar · 13 = Claro TyT · null = ambas. Para `analista` y `admin`
  *  — ver aware.routes.js parseFilters. */
@@ -54,6 +54,7 @@ const createSchema = z.object({
   area_id: z.number().int().positive().nullable().optional(),
   aware_scope: awareScopeSchema,
   aware_quality: z.boolean().optional(),
+  aware_recorrido: z.boolean().optional(),
   aware_view: awareViewSchema,
   admin_no_create: z.boolean().optional(),
   retell_scope: retellScopeSchema,
@@ -68,7 +69,7 @@ router.post(
   blockRestrictedWrite,
   validate(createSchema),
   asyncHandler(async (req, res) => {
-    const { name, email, password, role, area_id, aware_scope, aware_quality, aware_view, admin_no_create, retell_scope } = req.body;
+    const { name, email, password, role, area_id, aware_scope, aware_quality, aware_recorrido, aware_view, admin_no_create, retell_scope } = req.body;
     const exists = await db('users').where({ email }).first('id');
     if (exists) throw badRequest('Ya existe un usuario con ese correo');
     const password_hash = await bcrypt.hash(password, 10);
@@ -80,6 +81,7 @@ router.post(
       area_id: role === 'viewer' ? area_id ?? null : null,
       aware_scope: AWARE_SCOPED_ROLES.includes(role) ? aware_scope ?? null : null,
       aware_quality: AWARE_SCOPED_ROLES.includes(role) ? !!aware_quality : false,
+      aware_recorrido: AWARE_SCOPED_ROLES.includes(role) ? !!aware_recorrido : false,
       aware_view: AWARE_SCOPED_ROLES.includes(role) ? aware_view || 'full' : 'full',
       admin_no_create: role === 'admin' ? !!admin_no_create : false,
       retell_scope: role === 'admin' ? retell_scope ?? null : null,
@@ -104,6 +106,7 @@ const updateSchema = z.object({
   area_id: z.number().int().positive().nullable().optional(),
   aware_scope: awareScopeSchema,
   aware_quality: z.boolean().optional(),
+  aware_recorrido: z.boolean().optional(),
   aware_view: awareViewSchema,
   admin_no_create: z.boolean().optional(),
   retell_scope: retellScopeSchema,
@@ -121,13 +124,14 @@ router.patch(
     if (!user) throw notFound('Usuario no encontrado');
 
     const patch = { updated_at: db.fn.now() };
-    const { name, email, role, area_id, aware_scope, aware_quality, aware_view, admin_no_create, retell_scope, is_active, password } = req.body;
+    const { name, email, role, area_id, aware_scope, aware_quality, aware_recorrido, aware_view, admin_no_create, retell_scope, is_active, password } = req.body;
     if (name !== undefined) patch.name = name;
     if (email !== undefined) patch.email = email;
     if (role !== undefined) patch.role = role;
     if (area_id !== undefined) patch.area_id = area_id;
     if (aware_scope !== undefined) patch.aware_scope = aware_scope;
     if (aware_quality !== undefined) patch.aware_quality = aware_quality;
+    if (aware_recorrido !== undefined) patch.aware_recorrido = aware_recorrido;
     if (aware_view !== undefined) patch.aware_view = aware_view;
     if (admin_no_create !== undefined) patch.admin_no_create = admin_no_create;
     if (retell_scope !== undefined) patch.retell_scope = retell_scope;
@@ -142,6 +146,7 @@ router.patch(
     if (!AWARE_SCOPED_ROLES.includes(finalRole)) {
       patch.aware_scope = null;
       patch.aware_quality = false;
+      patch.aware_recorrido = false;
       patch.aware_view = 'full';
     }
     if (finalRole !== 'admin') {
