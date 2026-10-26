@@ -625,20 +625,22 @@ export function matchHuman(vRow, index) {
 }
 
 /** getFunnel — entrantes → conectadas → transferidas → atendidas. */
-export function aggregateFunnel(vRows, registroIndex, range, queueIndex = null) {
+export function aggregateFunnel(vRows, registroIndex, range, queueIndex = null, inProgressCtx = null) {
   let entrantes = 0;
   let conectadas = 0;
   let transferidas = 0;
   let atendidas = 0;
   let sinTipificar = 0;
+  let enCurso = 0;
   for (const v of vRows) {
     entrantes++;
     if (v.hangup_reason != null) conectadas++;
     if (v.hangup_reason === 'call_transfer') {
       transferidas++;
-      const o = transferOutcome(v, registroIndex, queueIndex);
+      const o = transferOutcome(v, registroIndex, queueIndex, inProgressCtx);
       if (o.attended) atendidas++;
       if (o.untyped) sinTipificar++;
+      if (o.inProgress) enCurso++;
     }
   }
   return {
@@ -649,8 +651,10 @@ export function aggregateFunnel(vRows, registroIndex, range, queueIndex = null) 
       { key: 'transferidas', label: 'Transferidas a asesor', count: transferidas, of_prev: rate(transferidas, conectadas) },
       { key: 'atendidas', label: 'Atendidas por un asesor', count: atendidas, of_prev: rate(atendidas, transferidas) },
     ],
-    not_attended: transferidas - atendidas,
-    not_attended_rate: rate(transferidas - atendidas, transferidas),
+    // Sin asesor = ni atendidas ni en curso (las en curso todavía pueden ser atendidas).
+    not_attended: transferidas - atendidas - enCurso,
+    not_attended_rate: rate(transferidas - atendidas - enCurso, transferidas),
+    in_progress: enCurso,
     // Atendidas por un asesor que (todavía) no tienen tipificación en Aware.
     attended_untyped: sinTipificar,
     attended_untyped_rate: rate(sinTipificar, atendidas),
@@ -857,11 +861,58 @@ export function matchQueueAnswered(vRow, index) {
   });
 }
 
-/** Resultado de una transferencia del bot: atendida (con o sin tipificación). */
-function transferOutcome(v, registroIndex, queueIndex) {
+/* "En curso": la central escribe cada llamada cuando CUELGAN — una transferencia
+ * de hoy sin ningún registro todavía en cdr_custom (ni el tramo con SOFIA) es
+ * porque el cliente sigue en línea (esperando en cola o hablando con el asesor),
+ * no porque se haya perdido (reportado 2026-10-26: las 9-11 "sin asesor" de TyT
+ * eran todas de los últimos ~20 min). Tope de 3 h por si un registro nunca llega. */
+const IN_PROGRESS_MAX_S = 3 * 60 * 60;
+
+async function fetchTodayCdrLegsLive(today) {
+  return awareQuery(
+    `SELECT telefono, hora FROM cdr_custom WHERE fecha = $1 AND call_id = ANY($2::text[])`,
+    [today, ALL_QUEUE_DIDS]
+  );
+}
+
+/** Contexto para marcar "en curso" las transferencias de hoy. `null` si el rango no incluye hoy. */
+export async function fetchInProgressContext(from, to) {
+  const { live, today } = splitRange(from, to);
+  if (!live) return null;
+  return cached(fetchKey('today-legs', today), FETCH_TTL_MS, async () => {
+    let rows;
+    try {
+      rows = await fetchTodayCdrLegsLive(today);
+    } catch (err) {
+      // Sin la central no se puede saber qué sigue en curso: mejor no marcar nada.
+      console.error('[aware.hybrid] cdr_custom de hoy no respondió (en curso):', err.message);
+      return null;
+    }
+    const legs = new Map();
+    for (const r of rows) {
+      const k = tel10(r.telefono);
+      if (!legs.has(k)) legs.set(k, []);
+      legs.get(k).push(timeToSeconds(String(r.hora).slice(0, 8)));
+    }
+    const nowSec = Math.floor(((Date.now() / 1000 - 5 * 3600) % 86400 + 86400) % 86400);
+    return { today, nowSec, legs };
+  });
+}
+
+function isInProgress(v, ctx) {
+  if (!ctx || v.fecha !== ctx.today) return false;
+  const vSec = timeToSeconds(String(v.hora).slice(0, 8));
+  if (ctx.nowSec - vSec > IN_PROGRESS_MAX_S) return false;
+  // 2 min de margen: el tramo con SOFIA arranca un instante antes de la hora registrada del bot.
+  return !(ctx.legs.get(tel10(v.telefono)) || []).some((s) => s >= vSec - 120);
+}
+
+/** Resultado de una transferencia del bot: atendida (con o sin tipificación),
+ *  en curso, o sin asesor (lo que no es ninguna de las dos). */
+function transferOutcome(v, registroIndex, queueIndex, inProgressCtx = null) {
   const typified = !!matchHuman(v, registroIndex);
   const attended = typified || matchQueueAnswered(v, queueIndex);
-  return { attended, untyped: attended && !typified };
+  return { attended, untyped: attended && !typified, inProgress: !attended && isInProgress(v, inProgressCtx) };
 }
 
 /** Índice telefono+fecha → candidatos de cdr_custom, para replicar el LATERAL
@@ -1370,38 +1421,50 @@ export async function fetchTranscriptMeta(callIds, { withText = false } = {}) {
 /* ───────────────────────── transferencias atendidas / embudo por día ───────────────────────── */
 
 /** getTransfersAttended — igual heurístico que getFunnel, por campaña. */
-export function aggregateTransfersAttended(vRows, registroIndex, queueIndex = null) {
+export function aggregateTransfersAttended(vRows, registroIndex, queueIndex = null, inProgressCtx = null) {
   const byProy = new Map();
   for (const v of vRows) {
     if (v.hangup_reason !== 'call_transfer') continue;
-    const e = byProy.get(v.proyecto_id) || { transfers: 0, attended: 0 };
+    const e = byProy.get(v.proyecto_id) || { transfers: 0, attended: 0, in_progress: 0 };
     e.transfers += 1;
-    if (transferOutcome(v, registroIndex, queueIndex).attended) e.attended += 1;
+    const o = transferOutcome(v, registroIndex, queueIndex, inProgressCtx);
+    if (o.attended) e.attended += 1;
+    if (o.inProgress) e.in_progress += 1;
     byProy.set(v.proyecto_id, e);
   }
   const by_project = [...byProy.entries()].map(([proyecto_id, e]) => ({
     proyecto_id,
     transfers: e.transfers,
     attended: e.attended,
-    not_attended: e.transfers - e.attended,
+    in_progress: e.in_progress,
+    not_attended: e.transfers - e.attended - e.in_progress,
     attended_rate: rate(e.attended, e.transfers),
   }));
   const transfers = by_project.reduce((s, p) => s + p.transfers, 0);
   const attended = by_project.reduce((s, p) => s + p.attended, 0);
+  const inProgress = by_project.reduce((s, p) => s + p.in_progress, 0);
   return {
     by_project,
-    total: { transfers, attended, not_attended: transfers - attended, attended_rate: rate(attended, transfers) },
+    total: {
+      transfers,
+      attended,
+      in_progress: inProgress,
+      not_attended: transfers - attended - inProgress,
+      attended_rate: rate(attended, transfers),
+    },
   };
 }
 
 /** getNotAttendedByDay — transferidas/atendidas por día. */
-export function aggregateNotAttendedByDay(vRows, registroIndex, queueIndex = null) {
+export function aggregateNotAttendedByDay(vRows, registroIndex, queueIndex = null, inProgressCtx = null) {
   const byDay = new Map();
   for (const v of vRows) {
     if (v.hangup_reason !== 'call_transfer') continue;
-    const e = byDay.get(v.fecha) || { day: v.fecha, transferidas: 0, atendidas: 0 };
+    const e = byDay.get(v.fecha) || { day: v.fecha, transferidas: 0, atendidas: 0, en_curso: 0 };
     e.transferidas += 1;
-    if (transferOutcome(v, registroIndex, queueIndex).attended) e.atendidas += 1;
+    const o = transferOutcome(v, registroIndex, queueIndex, inProgressCtx);
+    if (o.attended) e.atendidas += 1;
+    if (o.inProgress) e.en_curso += 1;
     byDay.set(v.fecha, e);
   }
   return [...byDay.values()]
@@ -1410,7 +1473,8 @@ export function aggregateNotAttendedByDay(vRows, registroIndex, queueIndex = nul
       day: e.day,
       transferidas: e.transferidas,
       atendidas: e.atendidas,
-      no_atendidas: e.transferidas - e.atendidas,
+      en_curso: e.en_curso,
+      no_atendidas: e.transferidas - e.atendidas - e.en_curso,
       atendidas_rate: rate(e.atendidas, e.transferidas),
     }));
 }
