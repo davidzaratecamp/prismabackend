@@ -625,17 +625,20 @@ export function matchHuman(vRow, index) {
 }
 
 /** getFunnel — entrantes → conectadas → transferidas → atendidas. */
-export function aggregateFunnel(vRows, registroIndex, range) {
+export function aggregateFunnel(vRows, registroIndex, range, queueIndex = null) {
   let entrantes = 0;
   let conectadas = 0;
   let transferidas = 0;
   let atendidas = 0;
+  let sinTipificar = 0;
   for (const v of vRows) {
     entrantes++;
     if (v.hangup_reason != null) conectadas++;
     if (v.hangup_reason === 'call_transfer') {
       transferidas++;
-      if (matchHuman(v, registroIndex)) atendidas++;
+      const o = transferOutcome(v, registroIndex, queueIndex);
+      if (o.attended) atendidas++;
+      if (o.untyped) sinTipificar++;
     }
   }
   return {
@@ -648,6 +651,9 @@ export function aggregateFunnel(vRows, registroIndex, range) {
     ],
     not_attended: transferidas - atendidas,
     not_attended_rate: rate(transferidas - atendidas, transferidas),
+    // Atendidas por un asesor que (todavía) no tienen tipificación en Aware.
+    attended_untyped: sinTipificar,
+    attended_untyped_rate: rate(sinTipificar, atendidas),
     approximate: true,
   };
 }
@@ -762,6 +768,100 @@ export async function fetchCdrRows(from, to) {
     ]);
     return histRows.concat(liveRows);
   });
+}
+
+/* ───────────── cdr_custom: llamadas CONTESTADAS en la cola humana ─────────────
+ * "Atendida por un asesor" no puede depender de registro_llamada: Aware solo
+ * crea ese registro cuando el asesor TIPIFICA (al colgar). Si el asesor contestó
+ * pero no tipificó —o la llamada sigue en curso— no hay registro y la
+ * transferencia salía como "sin asesor" (reportado 2026-10-26: de 19 "sin
+ * asesor" de TyT, 15 tenían conversación real con un asesor de 2 a 24 min; en
+ * 3 días ~1 de cada 4 contestadas en la cola 3010 quedó sin tipificar). La
+ * central (cdr_custom, contexto aware-cola-inbound) sí registra toda llamada
+ * contestada. La campaña sale del DID (call_id), no de proyecto_id/cola: en
+ * las no tipificadas esos dos vienen vacíos (proyecto_id = 0). */
+const QUEUE_DIDS_BY_BOT = {
+  12: HOGAR_CDR_DIDS,
+  13: ['011576019184507', '011576019193216'],
+};
+const BOT_BY_QUEUE_DID = Object.fromEntries(
+  Object.entries(QUEUE_DIDS_BY_BOT).flatMap(([bot, dids]) => dids.map((d) => [d, Number(bot)]))
+);
+const ALL_QUEUE_DIDS = Object.keys(BOT_BY_QUEUE_DID);
+
+async function fetchQueueAnsweredLive(from, to) {
+  return awareQuery(
+    `SELECT telefono, fecha, hora, call_id
+     FROM cdr_custom
+     WHERE fecha BETWEEN $1 AND $2 AND call_id = ANY($3::text[])
+       AND context = 'aware-cola-inbound' AND disposition = 'ANSWERED' AND billsec > 0`,
+    [from, to, ALL_QUEUE_DIDS]
+  );
+}
+
+async function fetchQueueAnsweredMirror(from, to) {
+  return db('aware_mirror_cdr_custom')
+    .select('telefono', 'fecha', 'hora', 'call_id')
+    .whereBetween('fecha', [from, to])
+    .whereIn('call_id', ALL_QUEUE_DIDS)
+    .where({ context: 'aware-cola-inbound', disposition: 'ANSWERED' })
+    .where('billsec', '>', 0);
+}
+
+/** Llamadas contestadas en las colas humanas de Hogar/TyT, Aware (hoy) + espejo (resto). */
+export async function fetchQueueAnsweredRows(from, to) {
+  return cached(fetchKey('queue-answered', from, to), FETCH_TTL_MS, async () => {
+    const { hist, live } = splitRange(from, to);
+    const [histRows, liveRows] = await Promise.all([
+      hist ? fetchQueueAnsweredMirror(hist.from, hist.to) : Promise.resolve([]),
+      live ? safeLive(fetchQueueAnsweredLive(live.from, live.to), 'cdr_custom cola') : Promise.resolve([]),
+    ]);
+    return histRows.concat(liveRows);
+  });
+}
+
+const tel10 = (t) => String(t || '').replace(/\D/g, '').slice(-10);
+
+/** Índice telefono(10 díg.)+fecha → [{ hora, bot }] de llamadas contestadas en cola. */
+export function buildQueueAnsweredIndex(rows) {
+  const map = new Map();
+  for (const r of rows) {
+    const bot = BOT_BY_QUEUE_DID[r.call_id];
+    if (!bot) continue;
+    const k = `${tel10(r.telefono)}|${r.fecha}`;
+    let arr = map.get(k);
+    if (!arr) {
+      arr = [];
+      map.set(k, arr);
+    }
+    arr.push({ hora: String(r.hora).slice(0, 8), bot });
+  }
+  return map;
+}
+
+// Margen entre el inicio de la llamada con SOFIA y el de la cola humana (su
+// conversación + la espera en cola). Evita que una llamada posterior del mismo
+// cliente, el mismo día, haga pasar por atendida una transferencia que se perdió.
+const QUEUE_MATCH_WINDOW_S = 60 * 60;
+
+/** ¿Un asesor contestó esta transferencia? Llamada contestada en la cola de la
+ *  misma campaña, mismo teléfono y día, que arranca después de la del bot. */
+export function matchQueueAnswered(vRow, index) {
+  if (!index) return false;
+  const arr = index.get(`${tel10(vRow.telefono)}|${vRow.fecha}`);
+  if (!arr) return false;
+  const vSec = timeToSeconds(String(vRow.hora).slice(0, 8));
+  return arr.some((c) => {
+    const diff = timeToSeconds(c.hora) - vSec;
+    return c.bot === Number(vRow.proyecto_id) && diff >= 0 && diff <= QUEUE_MATCH_WINDOW_S;
+  });
+}
+
+/** Resultado de una transferencia del bot: atendida (con o sin tipificación). */
+function transferOutcome(v, registroIndex, queueIndex) {
+  const typified = !!matchHuman(v, registroIndex);
+  const attended = typified || matchQueueAnswered(v, queueIndex);
+  return { attended, untyped: attended && !typified };
 }
 
 /** Índice telefono+fecha → candidatos de cdr_custom, para replicar el LATERAL
@@ -1270,13 +1370,13 @@ export async function fetchTranscriptMeta(callIds, { withText = false } = {}) {
 /* ───────────────────────── transferencias atendidas / embudo por día ───────────────────────── */
 
 /** getTransfersAttended — igual heurístico que getFunnel, por campaña. */
-export function aggregateTransfersAttended(vRows, registroIndex) {
+export function aggregateTransfersAttended(vRows, registroIndex, queueIndex = null) {
   const byProy = new Map();
   for (const v of vRows) {
     if (v.hangup_reason !== 'call_transfer') continue;
     const e = byProy.get(v.proyecto_id) || { transfers: 0, attended: 0 };
     e.transfers += 1;
-    if (matchHuman(v, registroIndex)) e.attended += 1;
+    if (transferOutcome(v, registroIndex, queueIndex).attended) e.attended += 1;
     byProy.set(v.proyecto_id, e);
   }
   const by_project = [...byProy.entries()].map(([proyecto_id, e]) => ({
@@ -1295,13 +1395,13 @@ export function aggregateTransfersAttended(vRows, registroIndex) {
 }
 
 /** getNotAttendedByDay — transferidas/atendidas por día. */
-export function aggregateNotAttendedByDay(vRows, registroIndex) {
+export function aggregateNotAttendedByDay(vRows, registroIndex, queueIndex = null) {
   const byDay = new Map();
   for (const v of vRows) {
     if (v.hangup_reason !== 'call_transfer') continue;
     const e = byDay.get(v.fecha) || { day: v.fecha, transferidas: 0, atendidas: 0 };
     e.transferidas += 1;
-    if (matchHuman(v, registroIndex)) e.atendidas += 1;
+    if (transferOutcome(v, registroIndex, queueIndex).attended) e.atendidas += 1;
     byDay.set(v.fecha, e);
   }
   return [...byDay.values()]

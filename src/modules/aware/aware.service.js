@@ -11,6 +11,8 @@ import {
   aggregateSofiaTipificacion,
   fetchRegistroRows,
   buildHumanMatchIndex,
+  fetchQueueAnsweredRows,
+  buildQueueAnsweredIndex,
   aggregateFunnel,
   humanQueuesFor,
   fetchCdrRows,
@@ -307,12 +309,14 @@ export function getTransfersAttended(f = {}) {
   const r = resolveFilters(f);
   return cached(key('transfers-attended', r), 300000, async () => {
     const queues = humanQueuesFor(r.proyectoIds);
-    const [vRows, registroRows] = await Promise.all([
+    const [vRows, registroRows, queueRows] = await Promise.all([
       fetchVoicebotRows(r.proyectoIds, r.from, r.to),
       fetchRegistroRows(queues, r.from, r.to),
+      fetchQueueAnsweredRows(r.from, r.to),
     ]);
     const idx = buildHumanMatchIndex(registroRows);
-    const { by_project, total } = aggregateTransfersAttended(vRows, idx);
+    const queueIdx = buildQueueAnsweredIndex(queueRows);
+    const { by_project, total } = aggregateTransfersAttended(vRows, idx, queueIdx);
     return {
       range: { from: r.from, to: r.to },
       total,
@@ -400,12 +404,13 @@ export function getFunnel(f = {}) {
   const r = resolveFilters(f);
   return cached(key('funnel', r), 300000, async () => {
     const queues = humanQueuesFor(r.proyectoIds);
-    const [vRows, registroRows] = await Promise.all([
+    const [vRows, registroRows, queueRows] = await Promise.all([
       fetchVoicebotRows(r.proyectoIds, r.from, r.to),
       fetchRegistroRows(queues, r.from, r.to),
+      fetchQueueAnsweredRows(r.from, r.to),
     ]);
     const idx = buildHumanMatchIndex(registroRows);
-    return aggregateFunnel(vRows, idx, { from: r.from, to: r.to });
+    return aggregateFunnel(vRows, idx, { from: r.from, to: r.to }, buildQueueAnsweredIndex(queueRows));
   });
 }
 
@@ -413,12 +418,13 @@ export function getNotAttendedByDay(f = {}) {
   const r = resolveFilters(f);
   return cached(key('not-attended-by-day', r), 300000, async () => {
     const queues = humanQueuesFor(r.proyectoIds);
-    const [vRows, registroRows] = await Promise.all([
+    const [vRows, registroRows, queueRows] = await Promise.all([
       fetchVoicebotRows(r.proyectoIds, r.from, r.to),
       fetchRegistroRows(queues, r.from, r.to),
+      fetchQueueAnsweredRows(r.from, r.to),
     ]);
     const idx = buildHumanMatchIndex(registroRows);
-    return aggregateNotAttendedByDay(vRows, idx);
+    return aggregateNotAttendedByDay(vRows, idx, buildQueueAnsweredIndex(queueRows));
   });
 }
 
