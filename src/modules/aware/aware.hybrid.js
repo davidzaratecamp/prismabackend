@@ -23,6 +23,7 @@ import {
   HOGAR_CDR_DIDS,
   DID_BY_CDR_CALL_ID,
   DID_BY_QUEUE,
+  DID_BY_QUEUE_CDR,
   DID_PRIMARY_BY_PROY,
 } from './aware.db.js';
 import { db } from '../../db/knex.js';
@@ -711,24 +712,27 @@ export function aggregateBotStats(rows, from, to) {
 }
 
 /** humanStatsFor (getPeriodComparison) — conversión real (asesor humano). */
-export function aggregateHumanStats(vRows, registroIndex) {
+export function aggregateHumanStats(vRows, registroIndex, queueIndex = null, inProgressCtx = null) {
   let transfers = 0;
   let atendidas = 0;
+  let tipificadas = 0;
   let up = 0;
   for (const v of vRows) {
     if (v.hangup_reason !== 'call_transfer') continue;
     transfers++;
-    const hm = matchHuman(v, registroIndex);
-    if (hm) {
-      atendidas++;
-      if (hm.nom === 'UP') up++;
+    const o = transferOutcome(v, registroIndex, queueIndex, inProgressCtx);
+    if (o.attended) atendidas++;
+    if (o.typified) {
+      tipificadas++;
+      if (o.hm.nom === 'UP') up++;
     }
   }
   return {
     transfers,
     atendidas,
     atendidas_rate: rate(atendidas, transfers),
-    conversion_rate: rate(up, atendidas),
+    // Sobre lo tipificado: de una atendida sin tipificar no se sabe si hubo venta.
+    conversion_rate: rate(up, tipificadas),
   };
 }
 
@@ -845,7 +849,7 @@ export function buildQueueAnsweredIndex(rows) {
       arr = [];
       map.set(k, arr);
     }
-    arr.push({ hora: String(r.hora).slice(0, 8), bot });
+    arr.push({ hora: String(r.hora).slice(0, 8), bot, did_raw: r.call_id });
   }
   return map;
 }
@@ -858,14 +862,22 @@ const QUEUE_MATCH_WINDOW_S = 60 * 60;
 /** ¿Un asesor contestó esta transferencia? Llamada contestada en la cola de la
  *  misma campaña, mismo teléfono y día, que arranca después de la del bot. */
 export function matchQueueAnswered(vRow, index) {
-  if (!index) return false;
+  return !!findQueueAnswered(vRow, index);
+}
+
+/** Igual que matchQueueAnswered pero devuelve el candidato ({ hora, bot,
+ *  did_raw }) — el DID de la cola revela por qué línea entró la llamada. */
+export function findQueueAnswered(vRow, index) {
+  if (!index) return null;
   const arr = index.get(`${tel10(vRow.telefono)}|${vRow.fecha}`);
-  if (!arr) return false;
+  if (!arr) return null;
   const vSec = timeToSeconds(String(vRow.hora).slice(0, 8));
-  return arr.some((c) => {
-    const diff = timeToSeconds(c.hora) - vSec;
-    return c.bot === Number(vRow.proyecto_id) && diff >= 0 && diff <= QUEUE_MATCH_WINDOW_S;
-  });
+  return (
+    arr.find((c) => {
+      const diff = timeToSeconds(c.hora) - vSec;
+      return c.bot === Number(vRow.proyecto_id) && diff >= 0 && diff <= QUEUE_MATCH_WINDOW_S;
+    }) || null
+  );
 }
 
 /* "En curso": la central escribe cada llamada cuando CUELGAN — una transferencia
@@ -906,7 +918,7 @@ export async function fetchInProgressContext(from, to) {
   });
 }
 
-function isInProgress(v, ctx) {
+export function isInProgress(v, ctx) {
   if (!ctx || v.fecha !== ctx.today) return false;
   const vSec = timeToSeconds(String(v.hora).slice(0, 8));
   if (ctx.nowSec - vSec > IN_PROGRESS_MAX_S) return false;
@@ -914,12 +926,23 @@ function isInProgress(v, ctx) {
   return !(ctx.legs.get(tel10(v.telefono)) || []).some((s) => s >= vSec - 120);
 }
 
-/** Resultado de una transferencia del bot: atendida (con o sin tipificación),
- *  en curso, o sin asesor (lo que no es ninguna de las dos). */
-function transferOutcome(v, registroIndex, queueIndex, inProgressCtx = null) {
-  const typified = !!matchHuman(v, registroIndex);
+/** Resultado de una transferencia del bot — la ÚNICA definición de "atendida"
+ *  de todo el módulo (Recorrido, Asesor humano, comparación de periodos y
+ *  Consolidado): tipificada por el asesor (salvo ABN, que es un abandono) o
+ *  contestada en la cola según la central; "en curso" si sigue en línea (hoy);
+ *  sin asesor, lo que no es ninguna de las dos. `hm` es el registro tipificado
+ *  (null si no hay, o si es ABN). */
+export function transferOutcome(v, registroIndex, queueIndex, inProgressCtx = null) {
+  const match = matchHuman(v, registroIndex);
+  const typified = !!match && match.nom !== 'ABN';
   const attended = typified || matchQueueAnswered(v, queueIndex);
-  return { attended, untyped: attended && !typified, inProgress: !attended && isInProgress(v, inProgressCtx) };
+  return {
+    hm: typified ? match : null,
+    typified,
+    attended,
+    untyped: attended && !typified,
+    inProgress: !attended && isInProgress(v, inProgressCtx),
+  };
 }
 
 /** Índice telefono+fecha → candidatos de cdr_custom, para replicar el LATERAL
@@ -961,7 +984,7 @@ export function matchCdr(vRow, index) {
  * (casi exacto); TyT y el resto de Hogar caen al heurístico de cola humana
  * (matchHuman, igual que el funnel) o al DID principal de la campaña.
  */
-export function aggregateDidBreakdown(vRows, registroIndex, cdrIndex) {
+export function aggregateDidBreakdown(vRows, registroIndex, cdrIndex, queueIndex = null) {
   const buckets = new Map();
   let exactos = 0;
   for (const v of vRows) {
@@ -971,11 +994,14 @@ export function aggregateDidBreakdown(vRows, registroIndex, cdrIndex) {
       cdrHit = cand ? DID_BY_CDR_CALL_ID[cand.call_id] || null : null;
     }
     let hProy = null;
+    let queueHit = null;
     if (v.hangup_reason === 'call_transfer') {
       const hm = matchHuman(v, registroIndex);
       if (hm) hProy = hm.proyecto_id;
+      // Atendida sin tipificar: la línea sale del DID de la cola contestada.
+      else queueHit = DID_BY_QUEUE_CDR[findQueueAnswered(v, queueIndex)?.did_raw] || null;
     }
-    const didHit = cdrHit || (hProy != null ? DID_BY_QUEUE[hProy] : null);
+    const didHit = cdrHit || (hProy != null ? DID_BY_QUEUE[hProy] : null) || queueHit;
     const didInfo = didHit || DID_PRIMARY_BY_PROY[v.proyecto_id];
     if (!didInfo) continue;
     if (didHit) exactos += 1;
@@ -1037,9 +1063,12 @@ export async function fetchTipoContacto() {
 /** Equivalente de la agrupación (tc.cod, tc.nombre, tc.efectivo) + conteo del
  *  SELECT principal de getHumanOutcomes, calculado sobre las filas de v +
  *  el índice de matchHuman (igual heurístico que funnel/did-breakdown). */
-export function aggregateHumanOutcomesMain(vRows, registroIndex, tipoContactoMap) {
+export function aggregateHumanOutcomesMain(vRows, registroIndex, tipoContactoMap, queueIndex = null, inProgressCtx = null) {
   let transfers = 0;
   let atendidas = 0;
+  let tipificadas = 0;
+  let sinTipificar = 0;
+  let enCurso = 0;
   let up = 0;
   let un = 0;
   let efectivas = 0;
@@ -1047,10 +1076,13 @@ export function aggregateHumanOutcomesMain(vRows, registroIndex, tipoContactoMap
   for (const v of vRows) {
     if (v.hangup_reason !== 'call_transfer') continue;
     transfers++;
-    const hm = matchHuman(v, registroIndex);
-    const cod = hm ? hm.nom : null;
+    const o = transferOutcome(v, registroIndex, queueIndex, inProgressCtx);
+    if (o.attended) atendidas++;
+    if (o.untyped) sinTipificar++;
+    if (o.inProgress) enCurso++;
+    const cod = o.hm ? o.hm.nom : null;
     if (!cod) continue;
-    atendidas++;
+    tipificadas++;
     if (cod === 'UP') up++;
     if (cod === 'UN') un++;
     const info = tipoContactoMap.get(cod);
@@ -1075,7 +1107,7 @@ export function aggregateHumanOutcomesMain(vRows, registroIndex, tipoContactoMap
   // corridas solo por venir de una fuente u otra.
   tip.sort((a, b) => b.calls - a.calls || a.cod.localeCompare(b.cod));
   const otros_resultados = tip.filter((t) => t.cod !== 'UP' && t.cod !== 'UN');
-  return { transfers, atendidas, up, un, efectivas, tip, otros_resultados };
+  return { transfers, atendidas, tipificadas, sinTipificar, enCurso, up, un, efectivas, tip, otros_resultados };
 }
 
 async function fetchRegistroUpUnLive(queueIds, from, to, nom) {
@@ -1317,7 +1349,7 @@ export function buildDeliverableMatchIndex(registroRows) {
  * mapRow() (sin cambios) lo siga consumiendo igual. `withTranscript` solo
  * decide si se incluye transcript_object (ya presente en vRows si se pidió).
  */
-export function buildDeliverableRows(vRows, registroIndex, cdrIndex, tipoContactoMap) {
+export function buildDeliverableRows(vRows, registroIndex, cdrIndex, tipoContactoMap, queueIndex = null, inProgressCtx = null) {
   const out = [];
   for (const v of vRows) {
     // DELIV_LATERAL (y HUMAN_MATCH/HUMAN_MATCH_TIP) exigen hangup_reason =
@@ -1326,7 +1358,13 @@ export function buildDeliverableRows(vRows, registroIndex, cdrIndex, tipoContact
     // por error la tipificación/DID de un match de registro_llamada que no
     // le correspondía (bug real encontrado 2026-10-20 al verificar contra
     // Aware: 3 de 1000 filas de la muestra, siempre TyT/"Gestión IA").
-    const hm = v.hangup_reason === 'call_transfer' ? matchHuman(v, registroIndex) : null;
+    const isTransfer = v.hangup_reason === 'call_transfer';
+    // Registro del asesor tal cual (incluido ABN): de ahí salen asesor, audio,
+    // tipificación y la cola. El estado sale de transferOutcome (mismo criterio
+    // que el resto del módulo, ver deliverableEstado).
+    const hm = isTransfer ? matchHuman(v, registroIndex) : null;
+    const o = isTransfer ? transferOutcome(v, registroIndex, queueIndex, inProgressCtx) : null;
+    const qCand = o && o.untyped ? findQueueAnswered(v, queueIndex) : null;
     const cdrCand = v.proyecto_id === 12 ? matchCdr(v, cdrIndex) : null;
     const tipoInfo = hm && hm.nom ? tipoContactoMap.get(hm.nom) : null;
     const ca = v.call_analysis || {};
@@ -1365,9 +1403,26 @@ export function buildDeliverableRows(vRows, registroIndex, cdrIndex, tipoContact
       did_raw: cdrCand ? cdrCand.call_id : null,
       tc_nombre: tipoInfo ? tipoInfo.nomenclatura_nombre : null,
       tc_efectivo: tipoInfo ? tipoInfo.contacto_efectivo : null,
+      q_attended: !!o && o.untyped,
+      q_did_raw: qCand ? qCand.did_raw : null,
+      in_progress: !!o && o.inProgress,
     });
   }
   return out;
+}
+
+/**
+ * Estado del entregable (campo 10) — misma regla que Recorrido: una
+ * transferencia es "transferido" si el asesor la tipificó (salvo ABN) o si la
+ * central la registra contestada en la cola (atendida sin tipificar, antes
+ * salía como "abandonado"); "en_curso" si sigue en línea (solo hoy); el resto
+ * es "abandonado" (colgó en espera o no hubo asesor).
+ */
+export function deliverableEstado(x) {
+  if (x.hangup_reason !== 'call_transfer') return 'ia';
+  if ((x.rid != null && x.nom !== 'ABN') || x.q_attended) return 'transferido';
+  if (x.in_progress) return 'en_curso';
+  return 'abandonado';
 }
 
 /**
@@ -1377,13 +1432,7 @@ export function buildDeliverableRows(vRows, registroIndex, cdrIndex, tipoContact
  */
 export function deliverableRowMatches(x, { estado, venta, tip, tipIa, phone }) {
   if (phone && !(x.telefono && x.telefono.toLowerCase().includes(phone.toLowerCase()))) return false;
-  if (estado === 'transferido') {
-    if (!(x.hangup_reason === 'call_transfer' && x.rid != null && x.nom !== 'ABN')) return false;
-  } else if (estado === 'abandonado') {
-    if (!(x.hangup_reason === 'call_transfer' && (x.rid == null || x.nom === 'ABN'))) return false;
-  } else if (estado === 'ia') {
-    if (x.hangup_reason === 'call_transfer') return false;
-  }
+  if (estado && deliverableEstado(x) !== estado) return false;
   if (venta === 'si') {
     if (x.nom !== 'UP') return false;
   } else if (venta === 'no') {
@@ -1487,16 +1536,17 @@ export function aggregateNotAttendedByDay(vRows, registroIndex, queueIndex = nul
 }
 
 /** getHumanFunnelByDay — transferidas/atendidas/UP por día. */
-export function aggregateHumanFunnelByDay(vRows, registroIndex) {
+export function aggregateHumanFunnelByDay(vRows, registroIndex, queueIndex = null, inProgressCtx = null) {
   const byDay = new Map();
   for (const v of vRows) {
     if (v.hangup_reason !== 'call_transfer') continue;
-    const e = byDay.get(v.fecha) || { day: v.fecha, transferidas: 0, atendidas: 0, up: 0 };
+    const e = byDay.get(v.fecha) || { day: v.fecha, transferidas: 0, atendidas: 0, tipificadas: 0, up: 0 };
     e.transferidas += 1;
-    const hm = matchHuman(v, registroIndex);
-    if (hm) {
-      e.atendidas += 1;
-      if (hm.nom === 'UP') e.up += 1;
+    const o = transferOutcome(v, registroIndex, queueIndex, inProgressCtx);
+    if (o.attended) e.atendidas += 1;
+    if (o.typified) {
+      e.tipificadas += 1;
+      if (o.hm.nom === 'UP') e.up += 1;
     }
     byDay.set(v.fecha, e);
   }
@@ -1507,7 +1557,7 @@ export function aggregateHumanFunnelByDay(vRows, registroIndex) {
       transferidas: e.transferidas,
       atendidas: e.atendidas,
       util_positivo: e.up,
-      conversion_rate: rate(e.up, e.atendidas),
+      conversion_rate: rate(e.up, e.tipificadas),
     }));
 }
 

@@ -22,6 +22,7 @@ import {
   BOT_PROY_IDS,
   AUDIO_BASE_URL,
   DID_BY_QUEUE,
+  DID_BY_QUEUE_CDR,
   DID_PRIMARY_BY_PROY,
   DID_LABELS,
   SEGMENT_BY_PROY,
@@ -43,6 +44,12 @@ import {
   deliverableRowMatches,
   fetchTranscriptMeta,
   humanQueuesFor,
+  fetchQueueAnsweredRows,
+  buildQueueAnsweredIndex,
+  fetchInProgressContext,
+  findQueueAnswered,
+  isInProgress,
+  deliverableEstado,
 } from './aware.hybrid.js';
 
 /* LATERAL: continuación humana de la transferencia + su tipificación. Extiende el
@@ -110,7 +117,8 @@ const DELIV_LATERAL = `
     LIMIT 1
   ) cdr ON true`;
 
-const ESTADOS = ['transferido', 'abandonado', 'ia'];
+const ESTADOS = ['transferido', 'abandonado', 'en_curso', 'ia'];
+const ESTADO_LABEL = { transferido: 'Transferido', abandonado: 'Abandonado', en_curso: 'En curso', ia: 'Gestión IA' };
 const VENTAS = ['si', 'no'];
 
 /**
@@ -124,16 +132,19 @@ const VENTAS = ['si', 'no'];
  */
 export async function runQuery(r, { estado, venta, tip, tipIa, phone, limit, offset, withTranscript }) {
   const queues = humanQueuesFor(r.proyectoIds);
-  const [vRows, registroRows, cdrRows, tipoRows] = await Promise.all([
+  const [vRows, registroRows, cdrRows, tipoRows, queueRows, inProgressCtx] = await Promise.all([
     fetchVoicebotRows(r.proyectoIds, r.from, r.to),
     fetchRegistroRowsDeliverable(queues, r.from, r.to),
     fetchCdrRows(r.from, r.to),
     fetchTipoContacto(),
+    fetchQueueAnsweredRows(r.from, r.to),
+    fetchInProgressContext(r.from, r.to),
   ]);
   const registroIdx = buildDeliverableMatchIndex(registroRows);
   const cdrIdx = buildCdrMatchIndex(cdrRows);
   const tipoMap = new Map(tipoRows.map((t) => [t.nomenclatura_id, t]));
-  const allRows = buildDeliverableRows(vRows, registroIdx, cdrIdx, tipoMap);
+  const queueIdx = buildQueueAnsweredIndex(queueRows);
+  const allRows = buildDeliverableRows(vRows, registroIdx, cdrIdx, tipoMap, queueIdx, inProgressCtx);
 
   const filtered = allRows.filter((x) => deliverableRowMatches(x, { estado, venta, tip, tipIa, phone }));
   filtered.sort((a, b) => {
@@ -175,9 +186,7 @@ function normMotivo(raw) {
 }
 
 function estadoOf(x) {
-  if (x.hangup_reason !== 'call_transfer') return 'Gestión IA';
-  if (x.rid && x.nom !== 'ABN') return 'Transferido';
-  return 'Abandonado';
+  return ESTADO_LABEL[deliverableEstado(x)];
 }
 
 /**
@@ -212,7 +221,8 @@ export function mapRow(x, retellMap) {
   // exacto por la cola humana si hubo transferencia; si tampoco, el DID
   // principal de la campaña (no se puede saber por cuál línea entró).
   const cdrHit = x.did_raw ? DID_BY_CDR_CALL_ID[x.did_raw] : null;
-  const didHit = cdrHit || (x.h_proy != null ? DID_BY_QUEUE[x.h_proy] : null);
+  const didHit =
+    cdrHit || (x.h_proy != null ? DID_BY_QUEUE[x.h_proy] : null) || (x.q_did_raw ? DID_BY_QUEUE_CDR[x.q_did_raw] : null);
   const didInfo = didHit || DID_PRIMARY_BY_PROY[x.proyecto_id] || null;
   const segmento = SEGMENT_BY_PROY[x.proyecto_id]?.segmento || null;
 
@@ -341,6 +351,18 @@ export async function getDeliverableCall(callId) {
   );
   const x = rows[0];
   if (!x) return null;
+  // Mismo criterio de estado que el listado (atendida sin tipificar / en curso).
+  if (x.hangup_reason === 'call_transfer') {
+    const [queueRows, inProgressCtx] = await Promise.all([
+      fetchQueueAnsweredRows(x.fecha, x.fecha),
+      fetchInProgressContext(x.fecha, x.fecha),
+    ]);
+    const typified = x.rid != null && x.nom !== 'ABN';
+    const qCand = typified ? null : findQueueAnswered(x, buildQueueAnsweredIndex(queueRows));
+    x.q_attended = !!qCand;
+    x.q_did_raw = qCand ? qCand.did_raw : null;
+    x.in_progress = !typified && !qCand && isInProgress(x, inProgressCtx);
+  }
   const retellMap = await retellDids([callId]);
   return {
     ...mapRow(x, retellMap),

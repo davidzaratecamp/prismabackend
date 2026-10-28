@@ -147,6 +147,12 @@ export const DID_BY_QUEUE = {
   11: { did: '6019193216', cola: 'Inb T&T IA 2', proyecto_id: 13 },
 };
 
+/** Mismo DID_BY_QUEUE pero indexado por el `call_id` de cdr_custom, que trae
+ *  el DID con prefijo "01157" (ej. '011576019184507'). */
+export const DID_BY_QUEUE_CDR = Object.fromEntries(
+  Object.values(DID_BY_QUEUE).map(({ did, cola }) => [`01157${did}`, { did, cola }])
+);
+
 /** DID principal por campaña — se usa cuando la llamada no llegó a un asesor
  *  (no hay cola humana que revele si entró por la línea 1 o la 2). */
 export const DID_PRIMARY_BY_PROY = {

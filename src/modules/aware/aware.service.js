@@ -132,16 +132,19 @@ export function getPeriodComparison(f = {}) {
     const prevFrom = addDays(prevTo, -(days - 1));
     const queues = humanQueuesFor(r.proyectoIds);
 
-    const [curV, prevV, curR, prevR] = await Promise.all([
+    const [curV, prevV, curR, prevR, curQ, prevQ, inProgressCtx] = await Promise.all([
       fetchVoicebotRows(r.proyectoIds, r.from, r.to),
       fetchVoicebotRows(r.proyectoIds, prevFrom, prevTo),
       fetchRegistroRows(queues, r.from, r.to),
       fetchRegistroRows(queues, prevFrom, prevTo),
+      fetchQueueAnsweredRows(r.from, r.to),
+      fetchQueueAnsweredRows(prevFrom, prevTo),
+      fetchInProgressContext(r.from, r.to), // el tramo anterior nunca incluye hoy
     ]);
     const curBot = aggregateBotStats(curV, r.from, r.to);
     const prevBot = aggregateBotStats(prevV, prevFrom, prevTo);
-    const curHuman = aggregateHumanStats(curV, buildHumanMatchIndex(curR));
-    const prevHuman = aggregateHumanStats(prevV, buildHumanMatchIndex(prevR));
+    const curHuman = aggregateHumanStats(curV, buildHumanMatchIndex(curR), buildQueueAnsweredIndex(curQ), inProgressCtx);
+    const prevHuman = aggregateHumanStats(prevV, buildHumanMatchIndex(prevR), buildQueueAnsweredIndex(prevQ));
 
     // diferencia en puntos porcentuales (o null si algún lado no tiene dato)
     const ppDelta = (cur, prev) => (cur == null || prev == null ? null : Math.round((cur - prev) * 10000) / 10000);
@@ -277,14 +280,15 @@ export function getDidBreakdown(f = {}) {
   const r = resolveFilters(f);
   return cached(key('did-breakdown', r), 60000, async () => {
     const queues = humanQueuesFor(r.proyectoIds);
-    const [vRows, registroRows, cdrRows] = await Promise.all([
+    const [vRows, registroRows, cdrRows, queueRows] = await Promise.all([
       fetchVoicebotRows(r.proyectoIds, r.from, r.to),
       fetchRegistroRows(queues, r.from, r.to),
       fetchCdrRows(r.from, r.to),
+      fetchQueueAnsweredRows(r.from, r.to),
     ]);
     const registroIdx = buildHumanMatchIndex(registroRows);
     const cdrIdx = buildCdrMatchIndex(cdrRows);
-    return aggregateDidBreakdown(vRows, registroIdx, cdrIdx);
+    return aggregateDidBreakdown(vRows, registroIdx, cdrIdx, buildQueueAnsweredIndex(queueRows));
   });
 }
 
@@ -593,14 +597,16 @@ export function getHumanOutcomes(f = {}) {
   const r = resolveFilters(f);
   return cached(key('human-outcomes', r), 300000, async () => {
     const queues = humanQueuesFor(r.proyectoIds);
-    const [vRows, registroRows, tipoRows] = await Promise.all([
+    const [vRows, registroRows, tipoRows, queueRows, inProgressCtx] = await Promise.all([
       fetchVoicebotRows(r.proyectoIds, r.from, r.to),
       fetchRegistroRows(queues, r.from, r.to),
       fetchTipoContacto(),
+      fetchQueueAnsweredRows(r.from, r.to),
+      fetchInProgressContext(r.from, r.to),
     ]);
     const registroIdx = buildHumanMatchIndex(registroRows);
     const tipoMap = new Map(tipoRows.map((t) => [t.nomenclatura_id, t]));
-    const main = aggregateHumanOutcomesMain(vRows, registroIdx, tipoMap);
+    const main = aggregateHumanOutcomesMain(vRows, registroIdx, tipoMap, buildQueueAnsweredIndex(queueRows), inProgressCtx);
 
     const [ventaRows, noVentaCampaignRows] = await Promise.all([
       fetchVentaDetalleRows(queues, r.from, r.to, main.up),
@@ -612,13 +618,19 @@ export function getHumanOutcomes(f = {}) {
     return {
       range: { from: r.from, to: r.to },
       transfers: main.transfers,
+      // "Atendida" con el mismo criterio que Recorrido y el Consolidado
+      // (transferOutcome): tipificada o contestada en la cola según la central.
       atendidas: main.atendidas,
-      sin_atender: main.transfers - main.atendidas,
+      atendidas_tipificadas: main.tipificadas,
+      atendidas_sin_tipificar: main.sinTipificar,
+      en_curso: main.enCurso,
+      sin_atender: main.transfers - main.atendidas - main.enCurso,
       atendidas_rate: rate(main.atendidas, main.transfers),
       util_positivo: main.up,
       util_negativo: main.un,
-      conversion_rate: rate(main.up, main.atendidas), // UP sobre lo atendido
-      efectivo_rate: rate(main.efectivas, main.atendidas),
+      // Sobre lo tipificado: de una atendida sin tipificar no se sabe el resultado.
+      conversion_rate: rate(main.up, main.tipificadas),
+      efectivo_rate: rate(main.efectivas, main.tipificadas),
       tipificaciones: main.tip,
       otros_resultados: main.otros_resultados,
       // Subconjuntos de "venta exitosa"/"no venta" (no suman aparte del total
@@ -636,12 +648,14 @@ export function getHumanFunnelByDay(f = {}) {
   const r = resolveFilters(f);
   return cached(key('human-funnel-by-day', r), 300000, async () => {
     const queues = humanQueuesFor(r.proyectoIds);
-    const [vRows, registroRows] = await Promise.all([
+    const [vRows, registroRows, queueRows, inProgressCtx] = await Promise.all([
       fetchVoicebotRows(r.proyectoIds, r.from, r.to),
       fetchRegistroRows(queues, r.from, r.to),
+      fetchQueueAnsweredRows(r.from, r.to),
+      fetchInProgressContext(r.from, r.to),
     ]);
     const idx = buildHumanMatchIndex(registroRows);
-    return aggregateHumanFunnelByDay(vRows, idx);
+    return aggregateHumanFunnelByDay(vRows, idx, buildQueueAnsweredIndex(queueRows), inProgressCtx);
   });
 }
 
