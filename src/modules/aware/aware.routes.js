@@ -34,7 +34,8 @@ router.use(requireAuth, requireRole('analista', 'admin'));
 // Resumen y Consolidado. El resto responde 403 aunque se llame directo a la API.
 const BASIC_ALLOW = [
   /^\/config$/,
-  /^\/analytics\/(filters|overview|period-comparison|funnel|volume-by-day|daily-trend|hangup|sentiment|service-types|did-breakdown|sofia-tipificacion|human-outcomes)$/,
+  // queue-abandon: la usan las tarjetas "Abandono en cola" y "Transferidas a asesor" del Resumen
+  /^\/analytics\/(filters|overview|period-comparison|funnel|volume-by-day|daily-trend|hangup|sentiment|service-types|did-breakdown|sofia-tipificacion|human-outcomes|queue-abandon)$/,
   /^\/deliverable(\/.*|\.csv|\.json)?$/,
   /^\/agosto\/(resumen|calls|motivos)$/,
 ];

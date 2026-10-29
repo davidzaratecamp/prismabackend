@@ -1492,14 +1492,15 @@ export function deliverableEstado(x) {
 }
 
 /**
- * Llamadas de SOFIA que quedan como "abandonado_cola" — exactamente la regla
- * de deliverableEstado, sin armar el entregable completo. Es la cifra que
- * muestran las tarjetas de abandono, para que cuadre con el filtro del
- * Consolidado (v_abandono cuenta eventos: un cliente que abandona dos veces
- * suma 2; aquí cuenta 1).
+ * Cuántas transferencias de SOFIA quedan en cada estado del Consolidado
+ * (transferido / abandonado_cola / transferencia_fallida / en_curso) —
+ * exactamente la regla de deliverableEstado, sin armar el entregable
+ * completo. Alimenta las tarjetas del Resumen para que cuadren con los
+ * filtros del Consolidado (v_abandono cuenta eventos: un cliente que
+ * abandona dos veces suma 2; aquí cuenta 1).
  */
-export function countQueueAbandonCalls(vRows, registroIndex, queueIndex, inProgressCtx, enteredIndex) {
-  let n = 0;
+export function countTransferStates(vRows, registroIndex, queueIndex, inProgressCtx, enteredIndex) {
+  const out = { transferido: 0, abandonado_cola: 0, transferencia_fallida: 0, en_curso: 0 };
   for (const v of vRows) {
     if (v.hangup_reason !== 'call_transfer') continue;
     const match = matchHuman(v, registroIndex);
@@ -1512,9 +1513,9 @@ export function countQueueAbandonCalls(vRows, registroIndex, queueIndex, inProgr
       in_progress: o.inProgress,
       q_entered: !o.attended && !!findQueueAnswered(v, enteredIndex),
     });
-    if (estado === 'abandonado_cola') n++;
+    out[estado]++;
   }
-  return n;
+  return out;
 }
 
 /**

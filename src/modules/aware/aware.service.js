@@ -46,7 +46,7 @@ import {
   aggregateAgentRanking,
   fetchAbandonoRows,
   aggregateQueueAbandon,
-  countQueueAbandonCalls,
+  countTransferStates,
   fetchQueueEnteredRows,
   toCallRow,
   listCallsMatches,
@@ -138,7 +138,8 @@ async function periodStats(proyectoIds, from, to) {
     ...aggregateBotStats(vRows, from, to),
     ...aggregateHumanStats(vRows, registroIdx, queueIdx, inProgressCtx),
     // llamadas, igual que el filtro "Abandonado en cola" del Consolidado
-    abandono_cola: countQueueAbandonCalls(vRows, registroIdx, queueIdx, inProgressCtx, buildQueueAnsweredIndex(enteredRows)),
+    abandono_cola: countTransferStates(vRows, registroIdx, queueIdx, inProgressCtx, buildQueueAnsweredIndex(enteredRows))
+      .abandonado_cola,
   };
 }
 
@@ -721,19 +722,24 @@ export function getQueueAbandon(f = {}) {
     ]);
     const result = aggregateQueueAbandon(abandonoRows, transferRows, r.proyectoIds);
     const ownRows = transferRows.filter((v) => r.proyectoIds.includes(v.proyecto_id));
+    // Estado de cada transferencia, con la misma regla que el Consolidado.
+    const transfer_states = countTransferStates(
+      ownRows,
+      buildHumanMatchIndex(registroRows),
+      buildQueueAnsweredIndex(queueRows),
+      inProgressCtx,
+      buildQueueAnsweredIndex(enteredRows)
+    );
     return {
       ...result,
       // `total` = eventos de abandono (v_abandono; un cliente que abandona 2
       // veces suma 2). `llamadas` = llamadas de SOFIA que terminaron
       // abandonadas en cola — misma regla y misma cifra que el filtro
       // "Abandonado en cola" del Consolidado.
-      llamadas: countQueueAbandonCalls(
-        ownRows,
-        buildHumanMatchIndex(registroRows),
-        buildQueueAnsweredIndex(queueRows),
-        inProgressCtx,
-        buildQueueAnsweredIndex(enteredRows)
-      ),
+      llamadas: transfer_states.abandonado_cola,
+      // Desglose de "Transferidas a asesor" (tooltip del Resumen): cada valor
+      // coincide con el filtro del mismo nombre en el Consolidado.
+      transfer_states,
       approximate: true,
       note: 'Atribuido por teléfono a la última transferencia de SOFIA del mismo día (heurístico, sin FK directa en Aware); lo que no encuentra match no se cuenta.',
     };
