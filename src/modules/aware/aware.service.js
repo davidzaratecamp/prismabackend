@@ -46,6 +46,8 @@ import {
   aggregateAgentRanking,
   fetchAbandonoRows,
   aggregateQueueAbandon,
+  countQueueAbandonCalls,
+  fetchQueueEnteredRows,
   toCallRow,
   listCallsMatches,
   aggregateAgentHangupByProject,
@@ -123,19 +125,20 @@ export function getOverview(f = {}) {
 /** Todas las métricas de un tramo para la comparación: bot + asesor humano + abandono en cola. */
 async function periodStats(proyectoIds, from, to) {
   const queues = humanQueuesFor(proyectoIds);
-  const [vRows, registroRows, queueRows, inProgressCtx, abandonoRows, allBotRows] = await Promise.all([
+  const [vRows, registroRows, queueRows, inProgressCtx, enteredRows] = await Promise.all([
     fetchVoicebotRows(proyectoIds, from, to),
     fetchRegistroRows(queues, from, to),
     fetchQueueAnsweredRows(from, to),
     fetchInProgressContext(from, to),
-    fetchAbandonoRows(from, to),
-    // el abandono se atribuye a campaña con las transferencias de ambas (igual que getQueueAbandon)
-    fetchVoicebotRows(BOT_PROY_IDS, from, to),
+    fetchQueueEnteredRows(from, to),
   ]);
+  const registroIdx = buildHumanMatchIndex(registroRows);
+  const queueIdx = buildQueueAnsweredIndex(queueRows);
   return {
     ...aggregateBotStats(vRows, from, to),
-    ...aggregateHumanStats(vRows, buildHumanMatchIndex(registroRows), buildQueueAnsweredIndex(queueRows), inProgressCtx),
-    abandono_cola: aggregateQueueAbandon(abandonoRows, allBotRows, proyectoIds).total,
+    ...aggregateHumanStats(vRows, registroIdx, queueIdx, inProgressCtx),
+    // llamadas, igual que el filtro "Abandonado en cola" del Consolidado
+    abandono_cola: countQueueAbandonCalls(vRows, registroIdx, queueIdx, inProgressCtx, buildQueueAnsweredIndex(enteredRows)),
   };
 }
 
@@ -707,13 +710,30 @@ export function getQueueAbandon(f = {}) {
     // El heurístico necesita TODAS las transferencias (ambas campañas), no
     // solo las del alcance pedido — igual que el CTE original, que no
     // filtraba `transfers` por proyecto_id.
-    const [abandonoRows, transferRows] = await Promise.all([
+    const queues = humanQueuesFor(r.proyectoIds);
+    const [abandonoRows, transferRows, registroRows, queueRows, inProgressCtx, enteredRows] = await Promise.all([
       fetchAbandonoRows(r.from, r.to),
       fetchVoicebotRows(BOT_PROY_IDS, r.from, r.to),
+      fetchRegistroRows(queues, r.from, r.to),
+      fetchQueueAnsweredRows(r.from, r.to),
+      fetchInProgressContext(r.from, r.to),
+      fetchQueueEnteredRows(r.from, r.to),
     ]);
     const result = aggregateQueueAbandon(abandonoRows, transferRows, r.proyectoIds);
+    const ownRows = transferRows.filter((v) => r.proyectoIds.includes(v.proyecto_id));
     return {
       ...result,
+      // `total` = eventos de abandono (v_abandono; un cliente que abandona 2
+      // veces suma 2). `llamadas` = llamadas de SOFIA que terminaron
+      // abandonadas en cola — misma regla y misma cifra que el filtro
+      // "Abandonado en cola" del Consolidado.
+      llamadas: countQueueAbandonCalls(
+        ownRows,
+        buildHumanMatchIndex(registroRows),
+        buildQueueAnsweredIndex(queueRows),
+        inProgressCtx,
+        buildQueueAnsweredIndex(enteredRows)
+      ),
       approximate: true,
       note: 'Atribuido por teléfono a la última transferencia de SOFIA del mismo día (heurístico, sin FK directa en Aware); lo que no encuentra match no se cuenta.',
     };

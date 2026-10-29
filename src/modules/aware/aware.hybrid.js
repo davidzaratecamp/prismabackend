@@ -1492,6 +1492,32 @@ export function deliverableEstado(x) {
 }
 
 /**
+ * Llamadas de SOFIA que quedan como "abandonado_cola" — exactamente la regla
+ * de deliverableEstado, sin armar el entregable completo. Es la cifra que
+ * muestran las tarjetas de abandono, para que cuadre con el filtro del
+ * Consolidado (v_abandono cuenta eventos: un cliente que abandona dos veces
+ * suma 2; aquí cuenta 1).
+ */
+export function countQueueAbandonCalls(vRows, registroIndex, queueIndex, inProgressCtx, enteredIndex) {
+  let n = 0;
+  for (const v of vRows) {
+    if (v.hangup_reason !== 'call_transfer') continue;
+    const match = matchHuman(v, registroIndex);
+    const o = transferOutcome(v, registroIndex, queueIndex, inProgressCtx);
+    const estado = deliverableEstado({
+      hangup_reason: v.hangup_reason,
+      rid: match ? match.rid : null,
+      nom: match ? match.nom : null,
+      q_attended: o.untyped,
+      in_progress: o.inProgress,
+      q_entered: !o.attended && !!findQueueAnswered(v, enteredIndex),
+    });
+    if (estado === 'abandonado_cola') n++;
+  }
+  return n;
+}
+
+/**
  * Traduce los filtros opcionales del entregable (extraConds en
  * aware.deliverable.js, versión SQL) a un predicado en JS sobre las filas
  * que arma buildDeliverableRows.
