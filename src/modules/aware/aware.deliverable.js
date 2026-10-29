@@ -6,7 +6,8 @@
  *
  * Campos: 1 call_id · 2 fecha · 3 hora · 4 asesor · 5 duración IA (s) ·
  * 6 duración asesor (s) · 7 duración total (s) · 8 DID · 9 segmento ·
- * 10 estado (Transferido/Abandonado/Gestión IA) · 11 venta (Sí/No) ·
+ * 10 estado (Transferido/Abandonado en cola/Transferencia fallida/En curso/
+ * Gestión IA) · 11 venta (Sí/No) ·
  * 12 tipificación (árbol de Claro) · 13 transcripción SOFIA↔cliente ·
  * 14 URL grabación (IA + asesor).
  *
@@ -45,6 +46,7 @@ import {
   fetchTranscriptMeta,
   humanQueuesFor,
   fetchQueueAnsweredRows,
+  fetchQueueEnteredRows,
   buildQueueAnsweredIndex,
   fetchInProgressContext,
   findQueueAnswered,
@@ -117,8 +119,14 @@ const DELIV_LATERAL = `
     LIMIT 1
   ) cdr ON true`;
 
-const ESTADOS = ['transferido', 'abandonado', 'en_curso', 'ia'];
-const ESTADO_LABEL = { transferido: 'Transferido', abandonado: 'Abandonado', en_curso: 'En curso', ia: 'Gestión IA' };
+const ESTADOS = ['transferido', 'abandonado_cola', 'transferencia_fallida', 'en_curso', 'ia'];
+const ESTADO_LABEL = {
+  transferido: 'Transferido',
+  abandonado_cola: 'Abandonado en cola',
+  transferencia_fallida: 'Transferencia fallida',
+  en_curso: 'En curso',
+  ia: 'Gestión IA',
+};
 const VENTAS = ['si', 'no'];
 
 /**
@@ -132,19 +140,21 @@ const VENTAS = ['si', 'no'];
  */
 export async function runQuery(r, { estado, venta, tip, tipIa, phone, limit, offset, withTranscript }) {
   const queues = humanQueuesFor(r.proyectoIds);
-  const [vRows, registroRows, cdrRows, tipoRows, queueRows, inProgressCtx] = await Promise.all([
+  const [vRows, registroRows, cdrRows, tipoRows, queueRows, inProgressCtx, enteredRows] = await Promise.all([
     fetchVoicebotRows(r.proyectoIds, r.from, r.to),
     fetchRegistroRowsDeliverable(queues, r.from, r.to),
     fetchCdrRows(r.from, r.to),
     fetchTipoContacto(),
     fetchQueueAnsweredRows(r.from, r.to),
     fetchInProgressContext(r.from, r.to),
+    fetchQueueEnteredRows(r.from, r.to),
   ]);
   const registroIdx = buildDeliverableMatchIndex(registroRows);
   const cdrIdx = buildCdrMatchIndex(cdrRows);
   const tipoMap = new Map(tipoRows.map((t) => [t.nomenclatura_id, t]));
   const queueIdx = buildQueueAnsweredIndex(queueRows);
-  const allRows = buildDeliverableRows(vRows, registroIdx, cdrIdx, tipoMap, queueIdx, inProgressCtx);
+  const enteredIdx = buildQueueAnsweredIndex(enteredRows);
+  const allRows = buildDeliverableRows(vRows, registroIdx, cdrIdx, tipoMap, queueIdx, inProgressCtx, enteredIdx);
 
   const filtered = allRows.filter((x) => deliverableRowMatches(x, { estado, venta, tip, tipIa, phone }));
   filtered.sort((a, b) => {
@@ -353,15 +363,17 @@ export async function getDeliverableCall(callId) {
   if (!x) return null;
   // Mismo criterio de estado que el listado (atendida sin tipificar / en curso).
   if (x.hangup_reason === 'call_transfer') {
-    const [queueRows, inProgressCtx] = await Promise.all([
+    const [queueRows, inProgressCtx, enteredRows] = await Promise.all([
       fetchQueueAnsweredRows(x.fecha, x.fecha),
       fetchInProgressContext(x.fecha, x.fecha),
+      fetchQueueEnteredRows(x.fecha, x.fecha),
     ]);
     const typified = x.rid != null && x.nom !== 'ABN';
     const qCand = typified ? null : findQueueAnswered(x, buildQueueAnsweredIndex(queueRows));
     x.q_attended = !!qCand;
     x.q_did_raw = qCand ? qCand.did_raw : null;
     x.in_progress = !typified && !qCand && isInProgress(x, inProgressCtx);
+    x.q_entered = !typified && !qCand && !!findQueueAnswered(x, buildQueueAnsweredIndex(enteredRows));
   }
   const retellMap = await retellDids([callId]);
   return {

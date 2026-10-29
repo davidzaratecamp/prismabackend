@@ -854,6 +854,40 @@ export async function fetchQueueAnsweredRows(from, to) {
   });
 }
 
+/* Toda llamada que ENTRÓ a la cola humana, con cualquier queue_status
+ * (contestada, ABANDON o vacío). Separa, entre las transferencias sin asesor,
+ * el abandono en cola (entró y colgó esperando) de la transferencia fallida
+ * (la central nunca la registró en la cola). */
+async function fetchQueueEnteredLive(from, to) {
+  return awareQuery(
+    `SELECT telefono, fecha, hora, call_id
+     FROM cdr_custom
+     WHERE fecha BETWEEN $1 AND $2 AND call_id = ANY($3::text[]) AND context = 'aware-cola-inbound'`,
+    [from, to, ALL_QUEUE_DIDS]
+  );
+}
+
+async function fetchQueueEnteredMirror(from, to) {
+  return db('aware_mirror_cdr_custom')
+    .select('telefono', 'fecha', 'hora', 'call_id')
+    .whereBetween('fecha', [from, to])
+    .whereIn('call_id', ALL_QUEUE_DIDS)
+    .where({ context: 'aware-cola-inbound' });
+}
+
+/** Llamadas que entraron a las colas de Hogar/TyT (cualquier estado), Aware (hoy) + espejo (resto).
+ *  Mismo formato que fetchQueueAnsweredRows: se indexa con buildQueueAnsweredIndex. */
+export async function fetchQueueEnteredRows(from, to) {
+  return cached(fetchKey('queue-entered', from, to), FETCH_TTL_MS, async () => {
+    const { hist, live } = splitRange(from, to);
+    const [histRows, liveRows] = await Promise.all([
+      hist ? fetchQueueEnteredMirror(hist.from, hist.to) : Promise.resolve([]),
+      live ? safeLive(fetchQueueEnteredLive(live.from, live.to), 'cdr_custom cola (entradas)') : Promise.resolve([]),
+    ]);
+    return histRows.concat(liveRows);
+  });
+}
+
 const tel10 = (t) => String(t || '').replace(/\D/g, '').slice(-10);
 
 /** Índice telefono(10 díg.)+fecha → [{ hora, bot }] de llamadas contestadas en cola. */
@@ -1368,7 +1402,15 @@ export function buildDeliverableMatchIndex(registroRows) {
  * mapRow() (sin cambios) lo siga consumiendo igual. `withTranscript` solo
  * decide si se incluye transcript_object (ya presente en vRows si se pidió).
  */
-export function buildDeliverableRows(vRows, registroIndex, cdrIndex, tipoContactoMap, queueIndex = null, inProgressCtx = null) {
+export function buildDeliverableRows(
+  vRows,
+  registroIndex,
+  cdrIndex,
+  tipoContactoMap,
+  queueIndex = null,
+  inProgressCtx = null,
+  queueEnteredIndex = null
+) {
   const out = [];
   for (const v of vRows) {
     // DELIV_LATERAL (y HUMAN_MATCH/HUMAN_MATCH_TIP) exigen hangup_reason =
@@ -1425,6 +1467,8 @@ export function buildDeliverableRows(vRows, registroIndex, cdrIndex, tipoContact
       q_attended: !!o && o.untyped,
       q_did_raw: qCand ? qCand.did_raw : null,
       in_progress: !!o && o.inProgress,
+      // Solo importa para las no atendidas: ¿llegó a entrar a la cola?
+      q_entered: !!o && !o.attended && !!findQueueAnswered(v, queueEnteredIndex),
     });
   }
   return out;
@@ -1434,14 +1478,17 @@ export function buildDeliverableRows(vRows, registroIndex, cdrIndex, tipoContact
  * Estado del entregable (campo 10) — misma regla que Recorrido: una
  * transferencia es "transferido" si el asesor la tipificó (salvo ABN) o si la
  * central la registra contestada en la cola (atendida sin tipificar, antes
- * salía como "abandonado"); "en_curso" si sigue en línea (solo hoy); el resto
- * es "abandonado" (colgó en espera o no hubo asesor).
+ * salía como "abandonado"); "en_curso" si sigue en línea (solo hoy). Las
+ * demás se separan en "abandonado_cola" (entró a la cola y colgó esperando,
+ * o el asesor tipificó ABN — cuadra con la tarjeta "Abandono en cola") y
+ * "transferencia_fallida" (la central nunca la registró en la cola).
  */
 export function deliverableEstado(x) {
   if (x.hangup_reason !== 'call_transfer') return 'ia';
   if ((x.rid != null && x.nom !== 'ABN') || x.q_attended) return 'transferido';
   if (x.in_progress) return 'en_curso';
-  return 'abandonado';
+  if (x.q_entered || x.nom === 'ABN') return 'abandonado_cola';
+  return 'transferencia_fallida';
 }
 
 /**
