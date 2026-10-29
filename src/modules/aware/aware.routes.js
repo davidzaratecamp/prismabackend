@@ -70,6 +70,9 @@ function parseFilters(req) {
   return {
     from: q.from,
     to: q.to,
+    // segundo rango libre de la comparación de periodos (Resumen)
+    cmpFrom: q.cmpFrom,
+    cmpTo: q.cmpTo,
     proyecto: scoped ? String(scope) : q.proyecto,
     hangup: q.hangup,
     phone: q.phone,

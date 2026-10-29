@@ -671,6 +671,7 @@ export function aggregateBotStats(rows, from, to) {
   let agent_hangup = 0;
   let inactivity = 0;
   let pos = 0;
+  let neg = 0;
   let sentTotal = 0;
   let ok = 0;
   let analyzed = 0;
@@ -686,7 +687,10 @@ export function aggregateBotStats(rows, from, to) {
     if (ca.user_sentiment === 'Positive') {
       pos++;
       sentTotal++;
-    } else if (ca.user_sentiment === 'Negative' || ca.user_sentiment === 'Neutral') {
+    } else if (ca.user_sentiment === 'Negative') {
+      neg++;
+      sentTotal++;
+    } else if (ca.user_sentiment === 'Neutral') {
       sentTotal++;
     }
     if (ca.call_successful === true || ca.call_successful === 'true') {
@@ -697,16 +701,25 @@ export function aggregateBotStats(rows, from, to) {
     }
   }
   const avg_dur = durations.length ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length) : 0;
+  const days = Math.round((new Date(`${to}T00:00:00Z`) - new Date(`${from}T00:00:00Z`)) / 86400000) + 1;
   return {
     from,
     to,
+    days,
     total_calls: total,
+    // Los rangos comparados pueden tener distinta duración: el promedio diario los iguala.
+    calls_per_day: days > 0 ? Math.round((total / days) * 10) / 10 : null,
+    transfers: transfer,
     transfer_rate: rate(transfer, total),
+    user_hangup,
     user_hangup_rate: rate(user_hangup, total),
+    agent_hangup,
     agent_hangup_rate: rate(agent_hangup, total),
+    inactivity,
     inactivity_rate: rate(inactivity, total),
     avg_duration_seconds: avg_dur,
     positive_rate: rate(pos, sentTotal),
+    negative_rate: rate(neg, sentTotal),
     success_rate: rate(ok, analyzed),
   };
 }
@@ -716,12 +729,14 @@ export function aggregateHumanStats(vRows, registroIndex, queueIndex = null, inP
   let transfers = 0;
   let atendidas = 0;
   let tipificadas = 0;
+  let enCurso = 0;
   let up = 0;
   for (const v of vRows) {
     if (v.hangup_reason !== 'call_transfer') continue;
     transfers++;
     const o = transferOutcome(v, registroIndex, queueIndex, inProgressCtx);
     if (o.attended) atendidas++;
+    if (o.inProgress) enCurso++;
     if (o.typified) {
       tipificadas++;
       if (o.hm.nom === 'UP') up++;
@@ -731,6 +746,10 @@ export function aggregateHumanStats(vRows, registroIndex, queueIndex = null, inP
     transfers,
     atendidas,
     atendidas_rate: rate(atendidas, transfers),
+    en_curso: enCurso,
+    sin_asesor: transfers - atendidas - enCurso,
+    sin_asesor_rate: rate(transfers - atendidas - enCurso, transfers),
+    ventas: up,
     // Sobre lo tipificado: de una atendida sin tipificar no se sabe si hubo venta.
     conversion_rate: rate(up, tipificadas),
   };

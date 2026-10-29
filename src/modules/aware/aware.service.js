@@ -120,53 +120,71 @@ export function getOverview(f = {}) {
  * Estadísticas base (bot) de un tramo de fechas — usado por getOverview y por
  * la comparación de periodos.
  */
+/** Todas las métricas de un tramo para la comparación: bot + asesor humano + abandono en cola. */
+async function periodStats(proyectoIds, from, to) {
+  const queues = humanQueuesFor(proyectoIds);
+  const [vRows, registroRows, queueRows, inProgressCtx, abandonoRows, allBotRows] = await Promise.all([
+    fetchVoicebotRows(proyectoIds, from, to),
+    fetchRegistroRows(queues, from, to),
+    fetchQueueAnsweredRows(from, to),
+    fetchInProgressContext(from, to),
+    fetchAbandonoRows(from, to),
+    // el abandono se atribuye a campaña con las transferencias de ambas (igual que getQueueAbandon)
+    fetchVoicebotRows(BOT_PROY_IDS, from, to),
+  ]);
+  return {
+    ...aggregateBotStats(vRows, from, to),
+    ...aggregateHumanStats(vRows, buildHumanMatchIndex(registroRows), buildQueueAnsweredIndex(queueRows), inProgressCtx),
+    abandono_cola: aggregateQueueAbandon(abandonoRows, allBotRows, proyectoIds).total,
+  };
+}
+
 /**
- * Compara el rango elegido contra el tramo inmediatamente anterior de la misma
+ * Compara dos tramos de fechas: el rango elegido (`from`/`to`) contra
+ * `cmpFrom`/`cmpTo` si vienen (rango libre que elige el usuario en la
+ * tarjeta), o si no contra el tramo inmediatamente anterior de la misma
  * duración (p. ej. "últimos 7 días" vs. los 7 días previos a esos).
  */
 export function getPeriodComparison(f = {}) {
   const r = resolveFilters(f);
-  return cached(key('period-comparison', r), 120000, async () => {
-    const days = Math.round((new Date(`${r.to}T00:00:00Z`) - new Date(`${r.from}T00:00:00Z`)) / 86400000) + 1;
-    const prevTo = addDays(r.from, -1);
-    const prevFrom = addDays(prevTo, -(days - 1));
-    const queues = humanQueuesFor(r.proyectoIds);
-
-    const [curV, prevV, curR, prevR, curQ, prevQ, inProgressCtx] = await Promise.all([
-      fetchVoicebotRows(r.proyectoIds, r.from, r.to),
-      fetchVoicebotRows(r.proyectoIds, prevFrom, prevTo),
-      fetchRegistroRows(queues, r.from, r.to),
-      fetchRegistroRows(queues, prevFrom, prevTo),
-      fetchQueueAnsweredRows(r.from, r.to),
-      fetchQueueAnsweredRows(prevFrom, prevTo),
-      fetchInProgressContext(r.from, r.to), // el tramo anterior nunca incluye hoy
+  const days = Math.round((new Date(`${r.to}T00:00:00Z`) - new Date(`${r.from}T00:00:00Z`)) / 86400000) + 1;
+  const custom = YMD.test(f.cmpFrom || '') && YMD.test(f.cmpTo || '');
+  let prevFrom;
+  let prevTo;
+  if (custom) {
+    [prevFrom, prevTo] = f.cmpFrom <= f.cmpTo ? [f.cmpFrom, f.cmpTo] : [f.cmpTo, f.cmpFrom];
+  } else {
+    prevTo = addDays(r.from, -1);
+    prevFrom = addDays(prevTo, -(days - 1));
+  }
+  return cached(key('period-comparison', r, `${prevFrom}:${prevTo}`), 120000, async () => {
+    const [curStats, prevStats] = await Promise.all([
+      periodStats(r.proyectoIds, r.from, r.to),
+      periodStats(r.proyectoIds, prevFrom, prevTo),
     ]);
-    const curBot = aggregateBotStats(curV, r.from, r.to);
-    const prevBot = aggregateBotStats(prevV, prevFrom, prevTo);
-    const curHuman = aggregateHumanStats(curV, buildHumanMatchIndex(curR), buildQueueAnsweredIndex(curQ), inProgressCtx);
-    const prevHuman = aggregateHumanStats(prevV, buildHumanMatchIndex(prevR), buildQueueAnsweredIndex(prevQ));
-
-    // diferencia en puntos porcentuales (o null si algún lado no tiene dato)
-    const ppDelta = (cur, prev) => (cur == null || prev == null ? null : Math.round((cur - prev) * 10000) / 10000);
-    const pctDelta = (cur, prev) => (prev ? Math.round(((cur - prev) / prev) * 10000) / 10000 : null);
-
-    return {
-      days,
-      current: { ...curBot, ...curHuman },
-      previous: { ...prevBot, ...prevHuman },
-      deltas: {
-        total_calls_pct: pctDelta(curBot.total_calls, prevBot.total_calls),
-        transfer_rate_pp: ppDelta(curBot.transfer_rate, prevBot.transfer_rate),
-        user_hangup_rate_pp: ppDelta(curBot.user_hangup_rate, prevBot.user_hangup_rate),
-        agent_hangup_rate_pp: ppDelta(curBot.agent_hangup_rate, prevBot.agent_hangup_rate),
-        success_rate_pp: ppDelta(curBot.success_rate, prevBot.success_rate),
-        positive_rate_pp: ppDelta(curBot.positive_rate, prevBot.positive_rate),
-        conversion_rate_pp: ppDelta(curHuman.conversion_rate, prevHuman.conversion_rate),
-        atendidas_rate_pp: ppDelta(curHuman.atendidas_rate, prevHuman.atendidas_rate),
-      },
-    };
+    // Tasas → diferencia en puntos porcentuales; conteos → variación relativa
+    // (o null si algún lado no tiene dato).
+    const deltas = {};
+    for (const k of COMPARISON_RATES) {
+      const [cur, prev] = [curStats[k], prevStats[k]];
+      deltas[k] = cur == null || prev == null ? null : Math.round((cur - prev) * 10000) / 10000;
+    }
+    for (const k of COMPARISON_COUNTS) {
+      const [cur, prev] = [curStats[k], prevStats[k]];
+      deltas[k] = cur == null || !prev ? null : Math.round(((cur - prev) / prev) * 10000) / 10000;
+    }
+    return { days, custom, current: curStats, previous: prevStats, deltas };
   });
 }
+
+const COMPARISON_RATES = [
+  'transfer_rate', 'atendidas_rate', 'sin_asesor_rate', 'conversion_rate', 'success_rate',
+  'user_hangup_rate', 'agent_hangup_rate', 'inactivity_rate', 'positive_rate', 'negative_rate',
+];
+const COMPARISON_COUNTS = [
+  'total_calls', 'calls_per_day', 'transfers', 'atendidas', 'sin_asesor', 'en_curso', 'ventas',
+  'abandono_cola', 'user_hangup', 'agent_hangup', 'inactivity', 'avg_duration_seconds',
+];
 
 /* ───────────────────────── series ───────────────────────── */
 
