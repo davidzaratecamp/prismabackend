@@ -9,6 +9,7 @@ import * as deliverable from './aware.deliverable.js';
 import * as agosto from './aware.agosto.js';
 import { streamAudioAsMp3 } from './aware.audio.js';
 import { getMonitor } from './aware.monitor.js';
+import { logAudit } from '../../utils/audit.js';
 
 const router = Router();
 
@@ -29,6 +30,42 @@ router.post(
 
 // Panel del rol `analista`; los `admin` también entran (ítem "Analítica Aware" en su sidebar).
 router.use(requireAuth, requireRole('analista', 'admin'));
+
+// Bitácora de accesos: qué consulta, exporta o escucha cada usuario. Solo las
+// rutas que corresponden a una acción del usuario (abrir una pestaña, una
+// llamada, un audio, exportar); el resto de tarjetas no se anota una a una.
+// Se registra al terminar la respuesta, así queda también lo denegado (403).
+const CAMPANA = { 12: 'Hogar', 13: 'TyT' };
+function describeAccess(req) {
+  const p = req.path;
+  let m;
+  if (p === '/analytics/overview') return ['consulta', 'Consultó Resumen'];
+  if (p === '/analytics/funnel') return ['consulta', 'Consultó Recorrido'];
+  if (p === '/deliverable') return ['consulta', 'Consultó Consolidado'];
+  if ((m = p.match(/^\/deliverable\.(csv|json)$/))) return ['exportacion', `Exportó Consolidado (${m[1].toUpperCase()})`];
+  if ((m = p.match(/^\/deliverable\/([^/]+)\/audio$/))) return ['audio', `Escuchó el audio de la llamada ${m[1]}`, m[1]];
+  if ((m = p.match(/^\/deliverable\/([^/]+)$/))) return ['consulta', `Abrió el detalle de la llamada ${m[1]}`, m[1]];
+  if (p === '/calls') return ['consulta', 'Consultó Llamadas'];
+  if ((m = p.match(/^\/calls\/([^/]+)$/))) return ['consulta', `Abrió el detalle de la llamada ${m[1]}`, m[1]];
+  if (p === '/live') return ['consulta', 'Consultó En vivo'];
+  if ((m = p.match(/^\/live\/([^/]+)\/monitor$/))) return ['consulta', `Monitoreó en vivo la llamada ${m[1]}`, m[1]];
+  return null;
+}
+router.use((req, res, next) => {
+  const d = req.method === 'GET' ? describeAccess(req) : null;
+  if (!d) return next();
+  const [accion, base, entidadId] = d;
+  const q = req.query || {};
+  const scope = req.user?.aware_scope;
+  const campana = CAMPANA[scope] || CAMPANA[q.proyecto] || 'Hogar y TyT';
+  const rango = q.from || q.to ? ` · ${q.from || '…'} a ${q.to || '…'}` : '';
+  const detalle = entidadId ? base : `${base} · ${campana}${rango}`;
+  res.on('finish', () => {
+    const resultado = res.statusCode < 400 ? 'ok' : res.statusCode === 403 ? 'denegado' : 'error';
+    logAudit(req, { tipo: 'acceso', accion, detalle, entidad: entidadId ? 'llamada' : 'panel_aware', entidadId, resultado });
+  });
+  next();
+});
 
 // Vista "básica" (users.aware_view = 'basico'): solo los endpoints que alimentan
 // Resumen y Consolidado. El resto responde 403 aunque se llame directo a la API.

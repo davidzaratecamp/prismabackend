@@ -3,6 +3,7 @@ import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
 import bcrypt from 'bcryptjs';
 import { db } from '../../db/knex.js';
+import { logAudit } from '../../utils/audit.js';
 import { asyncHandler } from '../../utils/asyncHandler.js';
 import { validate } from '../../middleware/validate.js';
 import { requireAuth, signToken } from '../../middleware/auth.js';
@@ -45,9 +46,16 @@ router.post(
   asyncHandler(async (req, res) => {
     const { email, password } = req.body;
     const user = await db('users').where({ email }).first();
-    if (!user || !user.is_active) throw unauthorized('Credenciales incorrectas');
-    const ok = await bcrypt.compare(password, user.password_hash);
-    if (!ok) throw unauthorized('Credenciales incorrectas');
+    const ok = !!user && !!user.is_active && (await bcrypt.compare(password, user.password_hash));
+    if (!ok) {
+      const motivo = !user ? 'usuario inexistente' : !user.is_active ? 'usuario inactivo' : 'contraseña incorrecta';
+      await logAudit(req, {
+        tipo: 'acceso', accion: 'login_fallido', detalle: `Inicio de sesión fallido (${motivo})`,
+        resultado: 'fallido', user: user ?? null, email,
+      });
+      throw unauthorized('Credenciales incorrectas');
+    }
+    await logAudit(req, { tipo: 'acceso', accion: 'login', detalle: 'Inicio de sesión', user });
     const token = signToken(user);
     res.json({ token, user: publicUser(user) });
   })

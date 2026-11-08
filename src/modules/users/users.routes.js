@@ -7,6 +7,7 @@ import { validate } from '../../middleware/validate.js';
 import { requireAuth, requireRole, blockRestrictedWrite } from '../../middleware/auth.js';
 import { notFound, badRequest } from '../../utils/httpError.js';
 import { logActivity } from '../../utils/activity.js';
+import { logAudit, diffFields } from '../../utils/audit.js';
 
 const router = Router();
 router.use(requireAuth);
@@ -21,6 +22,9 @@ const awareViewSchema = z.enum(['full', 'basico']).optional();
 /** 12 = solo agente Hogar · 13 = solo agente TyT · null = ambos. Independiente
  *  de aware_scope (ver retell.routes.js) — solo tiene efecto en `admin`. */
 const retellScopeSchema = z.union([z.literal(12), z.literal(13)]).nullable().optional();
+
+/** Campos de usuario que entran al antes/después de la bitácora (sin contraseña). */
+const AUDITED_COLS = ['name', 'email', 'role', 'area_id', 'aware_scope', 'aware_quality', 'aware_recorrido', 'aware_view', 'admin_no_create', 'retell_scope', 'is_active'];
 
 const AVATAR_COLORS = ['#6366f1', '#0ea5e9', '#10b981', '#f59e0b', '#ec4899', '#8b5cf6', '#ef4444', '#14b8a6'];
 const randomColor = () => AVATAR_COLORS[Math.floor(Math.random() * AVATAR_COLORS.length)];
@@ -95,6 +99,11 @@ router.post(
       action: 'created',
       summary: `Creó al usuario ${name} (${role})`,
     });
+    await logAudit(req, {
+      tipo: 'cambio', accion: 'usuario_creado', entidad: 'usuario', entidadId: id,
+      detalle: `Creó al usuario ${name} <${email}> con rol ${role}`,
+      cambios: diffFields({}, user, AUDITED_COLS),
+    });
     res.status(201).json(user);
   })
 );
@@ -156,6 +165,15 @@ router.patch(
 
     await db('users').where({ id: user.id }).update(patch);
     const updated = await db('users').select(USER_COLS).where({ id: user.id }).first();
+    const cambios = diffFields(user, updated, AUDITED_COLS);
+    if (password) cambios.password = { antes: '(oculta)', despues: '(cambiada)' };
+    if (Object.keys(cambios).length) {
+      await logAudit(req, {
+        tipo: 'cambio', accion: 'usuario_modificado', entidad: 'usuario', entidadId: user.id,
+        detalle: `Modificó al usuario ${updated.name} <${updated.email}>: ${Object.keys(cambios).join(', ')}`,
+        cambios,
+      });
+    }
     res.json(updated);
   })
 );
@@ -170,6 +188,11 @@ router.delete(
     if (user.id === req.user.id) throw badRequest('No puedes desactivar tu propia cuenta');
     // Baja lógica para preservar historial
     await db('users').where({ id: user.id }).update({ is_active: false, updated_at: db.fn.now() });
+    await logAudit(req, {
+      tipo: 'cambio', accion: 'usuario_desactivado', entidad: 'usuario', entidadId: user.id,
+      detalle: `Desactivó al usuario ${user.name} <${user.email}>`,
+      cambios: { is_active: { antes: !!user.is_active, despues: false } },
+    });
     res.json({ ok: true });
   })
 );
