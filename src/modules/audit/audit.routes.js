@@ -11,12 +11,12 @@ import { logAudit } from '../../utils/audit.js';
 const run = promisify(execFile);
 const router = Router();
 
-/** La bitácora la ven los admin y la cuenta interna analista.aware (igual que
- *  la pestaña de retención del panel Aware). */
-const AUDIT_EMAILS = ['analista.aware@asisteing.com'];
+/** La bitácora solo la ven estos dos usuarios (decisión del 2026-11-09); el
+ *  rol admin por sí solo no da acceso. */
+export const AUDIT_EMAILS = ['analista.aware@asisteing.com', 'david.lopez@asisteing.com'];
 router.use(requireAuth, (req, _res, next) => {
   const email = (req.user?.email || '').toLowerCase();
-  if (req.user?.role === 'admin' || AUDIT_EMAILS.includes(email)) return next();
+  if (AUDIT_EMAILS.includes(email)) return next();
   next(forbidden('Sin acceso a la bitácora de auditoría'));
 });
 
