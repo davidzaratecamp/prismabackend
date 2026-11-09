@@ -29,6 +29,10 @@ function parseJson(v) {
   }
 }
 
+/** La conexión usa dateStrings + timezone 'Z': las fechas llegan como texto en
+ *  UTC sin zona. Se devuelven en ISO con Z para que el front las convierta bien. */
+const utcIso = (v) => (typeof v === 'string' && !/[zZ]|[+-]\d\d:?\d\d$/.test(v) ? `${v.replace(' ', 'T')}Z` : v);
+
 async function listEvents({ tipo, from, to, q, limit }) {
   const query = db('audit_log')
     .leftJoin('users', 'users.id', 'audit_log.user_id')
@@ -43,7 +47,7 @@ async function listEvents({ tipo, from, to, q, limit }) {
       w.where('audit_log.detalle', 'like', `%${q}%`).orWhere('audit_log.user_email', 'like', `%${q}%`)
     );
   }
-  const rows = (await query).map((r) => ({ ...r, cambios: parseJson(r.cambios), origen: 'audit_log' }));
+  const rows = (await query).map((r) => ({ ...r, created_at: utcIso(r.created_at), cambios: parseJson(r.cambios), origen: 'audit_log' }));
 
   // Altas de usuario anteriores a esta bitácora: vienen de activity_log, que
   // las registraba desde el inicio. Se muestran como "bitácora anterior".
@@ -68,7 +72,7 @@ async function listEvents({ tipo, from, to, q, limit }) {
     for (const r of await old) {
       rows.push({
         id: `a${r.id}`,
-        created_at: r.created_at,
+        created_at: utcIso(r.created_at),
         tipo: 'cambio',
         accion: r.action === 'created' ? 'usuario_creado' : `usuario_${r.action}`,
         user_name: r.user_name,
